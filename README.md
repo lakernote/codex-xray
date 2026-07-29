@@ -14,6 +14,7 @@
 
 <p align="center">
   <a href="https://github.com/lakernote/codex-xray/actions/workflows/ci.yml"><img src="https://github.com/lakernote/codex-xray/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
+  <a href="https://github.com/lakernote/codex-xray/releases"><img src="https://img.shields.io/github/v/release/lakernote/codex-xray?include_prereleases&amp;sort=semver&amp;label=release" alt="GitHub Release" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-2f4f20.svg" alt="MIT License" /></a>
 </p>
 
@@ -21,6 +22,20 @@ Codex X-Ray is a usage and execution analysis tool for Codex. It shows quota and
 
 > [!IMPORTANT]
 > Codex X-Ray is an unofficial open-source project and is not affiliated with or endorsed by OpenAI.
+
+## Download
+
+Preview installers are available on the [GitHub Releases page](https://github.com/lakernote/codex-xray/releases). Choose the asset by its filename suffix:
+
+| System | Installer |
+| --- | --- |
+| macOS · Apple Silicon | `_aarch64.dmg` |
+| macOS · Intel | `_x64.dmg` |
+| Windows · 64-bit | `_x64-setup.exe` |
+| Ubuntu / Debian · 64-bit | `_amd64.deb` |
+| Fedora / RHEL · 64-bit | `.x86_64.rpm` |
+
+These preview builds are not yet signed with a trusted publisher certificate or notarized, so the operating system may show an unidentified-developer warning. Codex must already be installed and authenticated. The “Source code” archives are source snapshots, not installers.
 
 ## Screenshots
 
@@ -73,7 +88,7 @@ See the [English data source guide](docs/data-sources.en.md) for field sources, 
 
 ## Run from source
 
-Signed installers are not published yet. Development requires:
+Development requires:
 
 - Node.js 22 (18 minimum)
 - Rust stable
@@ -103,7 +118,7 @@ If `codex` is not on `PATH`, Codex X-Ray attempts to detect the CLI bundled with
 - API-equivalent cost estimates token value; it is not a ChatGPT/Codex subscription bill or an actual charge.
 - A separate App Server cannot always observe every transient state inside another Codex App process. The UI distinguishes official states from local-event inference.
 - Codex App Server and Session formats may evolve; compatibility follows the locally installed version.
-- The project is currently validated primarily on macOS. CI and draft build configuration cover Windows, Linux, and macOS.
+- The project is currently validated primarily on macOS. Release builds cover Windows, Linux, and macOS.
 
 ## License
 

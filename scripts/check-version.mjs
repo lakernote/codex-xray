@@ -42,4 +42,26 @@ if (tagFlag !== -1) {
   }
 }
 
+const channelFlag = process.argv.indexOf("--channel");
+if (channelFlag !== -1) {
+  const channel = process.argv[channelFlag + 1];
+  if (channel !== "prerelease" && channel !== "release") {
+    throw new Error(
+      "Release channel must be either prerelease or release.",
+    );
+  }
+
+  const hasPrereleaseSuffix = versions.packageJson.includes("-");
+  if (channel === "prerelease" && !hasPrereleaseSuffix) {
+    throw new Error(
+      `Prerelease channel requires a prerelease version: ${versions.packageJson}`,
+    );
+  }
+  if (channel === "release" && hasPrereleaseSuffix) {
+    throw new Error(
+      `Release channel requires a stable version: ${versions.packageJson}`,
+    );
+  }
+}
+
 console.log(`Version ${versions.packageJson} is consistent.`);

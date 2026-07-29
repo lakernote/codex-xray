@@ -36,9 +36,9 @@ Choose one release type and enter the version without a `v` prefix:
 - `prerelease`: use a semantic prerelease version such as `0.2.0-beta.1`.
 - `release`: use a stable semantic version such as `0.2.0`.
 
-The workflow synchronizes the version across the npm and Tauri manifests, commits that version to `main`, creates the annotated `v<version>` tag, reruns every quality gate, and builds draft macOS Apple Silicon, macOS Intel, Windows, and Linux artifacts. Prerelease versions are marked as GitHub prereleases automatically.
+The workflow synchronizes the version across the npm and Tauri manifests, commits that version to `main`, creates the annotated `v<version>` tag, reruns every quality gate, and builds draft macOS DMG, Windows NSIS, Linux DEB, and Linux RPM installers. Prerelease versions are marked as GitHub prereleases automatically. NSIS is used instead of MSI so semantic prerelease versions such as `beta.1` remain valid on Windows.
 
-Configure a protected GitHub `release` environment before the first public release. Review every draft artifact, then publish the GitHub Release manually. A failed build can leave a version commit and tag without a draft release; fix the failure and rerun the workflow only after deleting the failed tag or choosing a new version.
+Configure a protected GitHub `release` environment before the first public release. Review every draft artifact, then publish the GitHub Release manually. If a platform build fails, fix the workflow and run the same version again. An existing draft tag is reused and only missing installers are rebuilt; already published releases remain immutable.
 
 Unsigned development artifacts are suitable for internal verification only. Public macOS and Windows distribution should add platform signing and macOS notarization first.
 

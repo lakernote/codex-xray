@@ -14,6 +14,7 @@
 
 <p align="center">
   <a href="https://github.com/lakernote/codex-xray/actions/workflows/ci.yml"><img src="https://github.com/lakernote/codex-xray/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
+  <a href="https://github.com/lakernote/codex-xray/releases"><img src="https://img.shields.io/github/v/release/lakernote/codex-xray?include_prereleases&amp;sort=semver&amp;label=release" alt="GitHub Release" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-2f4f20.svg" alt="MIT License" /></a>
 </p>
 
@@ -21,6 +22,20 @@ Codex X-Ray 是 Codex 的用量与执行分析工具。它展示额度和 Token�
 
 > [!IMPORTANT]
 > Codex X-Ray 是非官方开源项目，与 OpenAI 无隶属或背书关系。
+
+## 下载
+
+预览版安装包发布在 [GitHub Releases](https://github.com/lakernote/codex-xray/releases)，根据文件名后缀选择：
+
+| 系统 | 安装包 |
+| --- | --- |
+| macOS · Apple 芯片 | `_aarch64.dmg` |
+| macOS · Intel | `_x64.dmg` |
+| Windows · 64 位 | `_x64-setup.exe` |
+| Ubuntu / Debian · 64 位 | `_amd64.deb` |
+| Fedora / RHEL · 64 位 | `.x86_64.rpm` |
+
+当前预览版尚未使用可信发布者证书签名或公证，操作系统可能显示“未知开发者”警告。使用前需要已经安装并登录 Codex。“Source code”压缩包是源码快照，不是安装包。
 
 ## 界面
 
@@ -79,7 +94,7 @@ $CODEX_HOME/sessions ──只读 JSONL 事件─────────┘
 
 ## 从源码运行
 
-当前尚未发布签名安装包。开发环境需要：
+开发环境需要：
 
 - Node.js 22（最低 18）
 - Rust stable
@@ -109,7 +124,7 @@ npm run tauri build
 - API 等价成本用于比较 Token 价值，不是 ChatGPT/Codex 订阅账单或实际扣款。
 - 独立 App Server 无法保证看到另一个 Codex App 进程的全部瞬时状态；界面会区分官方状态与本地事件推断。
 - Codex App Server 与 Session 格式仍可能变化，兼容性以当前安装版本为准。
-- 当前主要在 macOS 上验证；仓库提供 Windows、Linux 和 macOS 的 CI/草稿构建配置。
+- 当前主要在 macOS 上验证；发布流程覆盖 Windows、Linux 和 macOS。
 
 ## License
 

@@ -30,6 +30,8 @@ jobs:
     outputs:
       tag: ${{ steps.metadata.outputs.tag }}
       prerelease: ${{ steps.metadata.outputs.prerelease }}
+      matrix: ${{ steps.metadata.outputs.matrix }}
+      tag_exists: ${{ steps.metadata.outputs.tag_exists }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -39,33 +41,98 @@ jobs:
         with:
           node-version: "22"
           cache: npm
-      - run: npm ci
       - name: Resolve release metadata
         id: metadata
         env:
+          GH_TOKEN: ${{ github.token }}
           RELEASE_CHANNEL: ${{ inputs.channel }}
           RELEASE_VERSION: ${{ inputs.version }}
         run: |
           tag="v${RELEASE_VERSION}"
           if git rev-parse --verify --quiet "refs/tags/${tag}" >/dev/null; then
-            echo "::error::Tag ${tag} already exists."
-            exit 1
+            tag_exists=true
+          else
+            tag_exists=false
           fi
+
           if [ "${RELEASE_CHANNEL}" = "prerelease" ]; then
+            if [[ "${RELEASE_VERSION}" != *-* ]]; then
+              echo "::error::Prerelease versions need a suffix such as beta.1."
+              exit 1
+            fi
             prerelease=true
           else
+            if [[ "${RELEASE_VERSION}" == *-* ]]; then
+              echo "::error::Stable release versions cannot contain a prerelease suffix."
+              exit 1
+            fi
             prerelease=false
           fi
+
+          release_json="${RUNNER_TEMP}/release.json"
+          if [ "${tag_exists}" = "true" ] && gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${tag}" > "${release_json}" 2>/dev/null; then
+            if [ "$(jq -r '.draft' "${release_json}")" != "true" ]; then
+              echo "::error::Release ${tag} is already published and cannot be rebuilt."
+              exit 1
+            fi
+
+            while read -r asset_id; do
+              [ -z "${asset_id}" ] || gh api --method DELETE "repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}"
+            done < <(
+              jq -r '.assets[]
+                | select(.name | endswith(".AppImage") or endswith(".app.tar.gz"))
+                | .id' "${release_json}"
+            )
+          else
+            printf '{"assets":[]}\n' > "${release_json}"
+          fi
+
+          include='[]'
+          add_target() {
+            include="$(jq -cn \
+              --argjson current "${include}" \
+              --arg platform "$1" \
+              --arg args "$2" \
+              '$current + [{platform: $platform, args: $args}]')"
+          }
+          has_asset() {
+            jq -e --arg suffix "$1" \
+              '.assets | any(.[]; .name | endswith($suffix))' \
+              "${release_json}" >/dev/null
+          }
+
+          has_asset "_aarch64.dmg" || add_target macos-latest "--target aarch64-apple-darwin --bundles dmg"
+          has_asset "_x64.dmg" || add_target macos-latest "--target x86_64-apple-darwin --bundles dmg"
+          if ! has_asset "_amd64.deb" || ! has_asset ".x86_64.rpm"; then
+            add_target ubuntu-22.04 "--bundles deb,rpm"
+          fi
+          has_asset "_x64-setup.exe" || add_target windows-latest "--bundles nsis"
+
+          if [ "$(jq 'length' <<< "${include}")" -eq 0 ]; then
+            echo "::error::Draft ${tag} already contains every installer."
+            exit 1
+          fi
+
           echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "tag_exists=${tag_exists}" >> "$GITHUB_OUTPUT"
           echo "prerelease=${prerelease}" >> "$GITHUB_OUTPUT"
+          echo "matrix=$(jq -cn --argjson include "${include}" '{include: $include}')" >> "$GITHUB_OUTPUT"
+      - name: Check out existing release tag
+        if: steps.metadata.outputs.tag_exists == 'true'
+        env:
+          RELEASE_TAG: ${{ steps.metadata.outputs.tag }}
+        run: git checkout --detach "${RELEASE_TAG}"
+      - run: npm ci
       - name: Synchronize application version
+        if: steps.metadata.outputs.tag_exists != 'true'
         env:
           RELEASE_CHANNEL: ${{ inputs.channel }}
           RELEASE_VERSION: ${{ inputs.version }}
         run: npm run version:set -- "$RELEASE_VERSION" --channel "$RELEASE_CHANNEL"
-      - run: npm run version:check -- --tag "${{ steps.metadata.outputs.tag }}"
+      - run: npm run version:check -- --tag "${{ steps.metadata.outputs.tag }}" --channel "${{ inputs.channel }}"
       - run: git diff --check
       - name: Commit version and create tag
+        if: steps.metadata.outputs.tag_exists != 'true'
         env:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           RELEASE_TAG: ${{ steps.metadata.outputs.tag }}
@@ -118,16 +185,7 @@ jobs:
       contents: write
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - platform: macos-latest
-            args: "--target aarch64-apple-darwin"
-          - platform: macos-latest
-            args: "--target x86_64-apple-darwin"
-          - platform: ubuntu-22.04
-            args: ""
-          - platform: windows-latest
-            args: ""
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v7
@@ -156,8 +214,17 @@ jobs:
         with:
           tagName: ${{ needs.prepare.outputs.tag }}
           releaseName: "Codex X-Ray ${{ needs.prepare.outputs.tag }}"
-          releaseBody: "See CHANGELOG.md and the attached installers."
+          releaseBody: |
+            Choose the installer for your system:
+
+            - macOS Apple Silicon: `_aarch64.dmg`
+            - macOS Intel: `_x64.dmg`
+            - Windows 64-bit: `_x64-setup.exe`
+            - Ubuntu / Debian 64-bit: `_amd64.deb`
+            - Fedora / RHEL 64-bit: `.x86_64.rpm`
+
+            These builds are not yet signed with a trusted publisher certificate or notarized. See `CHANGELOG.md` for changes.
           releaseDraft: true
           prerelease: ${{ needs.prepare.outputs.prerelease }}
-          retryAttempts: 2
+          retryAttempts: 0
           args: ${{ matrix.args }}
