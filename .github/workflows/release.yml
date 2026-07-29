@@ -70,7 +70,10 @@ jobs:
           fi
 
           release_json="${RUNNER_TEMP}/release.json"
-          if [ "${tag_exists}" = "true" ] && gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${tag}" > "${release_json}" 2>/dev/null; then
+          release_found=false
+          if [ "${tag_exists}" = "true" ] && gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+            | jq -s -e --arg tag "${tag}" '[.[][] | select(.tag_name == $tag)][0]' > "${release_json}"; then
+            release_found=true
             if [ "$(jq -r '.draft' "${release_json}")" != "true" ]; then
               echo "::error::Release ${tag} is already published and cannot be rebuilt."
               exit 1
@@ -83,7 +86,9 @@ jobs:
                 | select(.name | endswith(".AppImage") or endswith(".app.tar.gz"))
                 | .id' "${release_json}"
             )
-          else
+          fi
+
+          if [ "${release_found}" != "true" ]; then
             printf '{"assets":[]}\n' > "${release_json}"
           fi
 
