@@ -739,10 +739,10 @@ pub fn read_usage_index(path: &Path) -> Result<Vec<UsageIndexFile>, String> {
         for row in rows {
             let (session_file_id, turn) =
                 row.map_err(|error| format!("无法读取 Turn 索引：{error}"))?;
-            if let Some(session_path) = paths_by_id.get(&session_file_id) {
-                if let Some(file) = files.get_mut(session_path) {
-                    file.turns.push(turn);
-                }
+            if let Some(session_path) = paths_by_id.get(&session_file_id)
+                && let Some(file) = files.get_mut(session_path)
+            {
+                file.turns.push(turn);
             }
         }
     }
@@ -778,10 +778,10 @@ pub fn read_usage_index(path: &Path) -> Result<Vec<UsageIndexFile>, String> {
         for row in rows {
             let (session_file_id, event) =
                 row.map_err(|error| format!("无法读取 Token 事件：{error}"))?;
-            if let Some(session_path) = paths_by_id.get(&session_file_id) {
-                if let Some(file) = files.get_mut(session_path) {
-                    file.events.push(event);
-                }
+            if let Some(session_path) = paths_by_id.get(&session_file_id)
+                && let Some(file) = files.get_mut(session_path)
+            {
+                file.events.push(event);
             }
         }
     }

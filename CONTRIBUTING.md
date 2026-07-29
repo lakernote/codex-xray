@@ -1,6 +1,6 @@
 # Contributing
 
-Codex X-Ray is a local-first Tauri application. Keep changes evidence-based: official Codex values, local Session facts, and X-Ray estimates must remain visibly distinct.
+Codex X-Ray is a Tauri desktop application. Keep changes evidence-based: official Codex values, local Session facts, and X-Ray estimates must remain visibly distinct.
 
 ## Local verification
 
@@ -9,7 +9,9 @@ npm ci
 npm run version:check
 npm run check
 npm run build
+npm audit --audit-level=high
 cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
 cargo test --manifest-path src-tauri/Cargo.toml --locked
 ```
 

@@ -58,6 +58,14 @@ pub struct EnvironmentSnapshot {
     pub warnings: Vec<String>,
 }
 
+pub struct EnvironmentRuntime<'a> {
+    pub codex_version: &'a str,
+    pub codex_binary: &'a Path,
+    pub xray_data_path: &'a Path,
+    pub xray_sqlite_path: &'a Path,
+    pub storage: StorageHealth,
+}
+
 pub fn codex_home() -> PathBuf {
     env::var_os("CODEX_HOME")
         .map(PathBuf::from)
@@ -171,12 +179,15 @@ pub fn build_environment_snapshot(
     raw: &Value,
     provider_snapshot: &ProviderSnapshot,
     settings_snapshot: &SettingsSnapshot,
-    codex_version: &str,
-    codex_binary: &Path,
-    xray_data_path: &Path,
-    xray_sqlite_path: &Path,
-    storage: StorageHealth,
+    runtime: EnvironmentRuntime<'_>,
 ) -> EnvironmentSnapshot {
+    let EnvironmentRuntime {
+        codex_version,
+        codex_binary,
+        xray_data_path,
+        xray_sqlite_path,
+        storage,
+    } = runtime;
     let home = codex_home();
     let sessions_path = home.join("sessions");
     let active_provider = provider_snapshot

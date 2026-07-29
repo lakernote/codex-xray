@@ -338,8 +338,7 @@ nav {
 
 /* Trace analysis */
 
-.trace-workspace,
-.sources-workspace {
+.trace-workspace {
   padding-bottom: 10px;
 }
 
@@ -776,217 +775,6 @@ nav {
   border-radius: 50%;
   background: var(--accent);
   animation: cost-pulse 1.5s infinite;
-}
-
-/* Data provenance */
-
-.source-guide-button {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  padding: 8px 11px;
-  border: 1px solid var(--line-strong);
-  border-radius: 6px;
-  color: #98a395;
-  background: transparent;
-  font-size: 12px;
-  cursor: pointer;
-}
-
-.source-guide-button svg,
-.source-links svg {
-  width: 14px;
-  height: 14px;
-  flex: 0 0 auto;
-  stroke-width: 1.8;
-}
-
-.source-guide-button:hover {
-  border-color: rgba(183, 243, 107, 0.25);
-  color: var(--accent);
-}
-
-.sources-table {
-  margin-top: 27px;
-  border-top: 1px solid var(--line);
-}
-
-.sources-table-head,
-.source-row {
-  display: grid;
-  grid-template-columns: minmax(160px, 0.75fr) minmax(210px, 0.9fr) minmax(300px, 1.8fr);
-  gap: 24px;
-}
-
-.sources-table-head {
-  padding: 10px 14px;
-  color: #596159;
-  font-size: 13px;
-  letter-spacing: 0.09em;
-  text-transform: uppercase;
-}
-
-.source-row {
-  align-items: center;
-  min-height: 68px;
-  padding: 12px 14px;
-  border-top: 1px solid var(--line);
-}
-
-.source-row:last-child {
-  border-bottom: 1px solid var(--line);
-}
-
-.source-row-metric {
-  display: grid;
-  gap: 8px;
-}
-
-.source-row-metric strong {
-  color: #cbd4c8;
-  font-size: 12px;
-  font-weight: 570;
-}
-
-.source-row-metric div {
-  display: flex;
-  gap: 5px;
-}
-
-.source-row-metric i {
-  padding: 2px 5px;
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  color: #687168;
-  font-size: 13px;
-  font-style: normal;
-}
-
-.source-row-metric i.direct {
-  border-color: rgba(183, 243, 107, 0.2);
-  color: #90b568;
-}
-
-.source-row-metric i.delayed {
-  border-color: rgba(255, 177, 120, 0.18);
-  color: #a78670;
-}
-
-.source-row-origin {
-  display: grid;
-  gap: 7px;
-}
-
-.source-kind {
-  width: fit-content;
-  color: #8b9689;
-  font-size: 13px;
-}
-
-.source-kind.official {
-  color: var(--accent);
-}
-
-.source-kind.estimate {
-  color: #b9a96e;
-}
-
-.source-row-origin code {
-  overflow: hidden;
-  color: #596159;
-  font-family: "SFMono-Regular", Consolas, monospace;
-  font-size: 13px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.source-row > p {
-  margin: 0;
-  color: #7a8479;
-  font-size: 12px;
-  line-height: 1.55;
-}
-
-.source-privacy {
-  display: grid;
-  grid-template-columns: 24px minmax(0, 1fr);
-  gap: 14px;
-  margin-top: 27px;
-  padding: 16px;
-  border: 1px solid rgba(183, 243, 107, 0.15);
-  border-radius: 6px;
-  background: rgba(183, 243, 107, 0.025);
-}
-
-.source-privacy-icon {
-  width: 20px;
-  height: 20px;
-  margin-top: 1px;
-  color: var(--accent);
-  stroke-width: 1.7;
-}
-
-.source-privacy h2 {
-  margin: 0;
-  color: #cbd4c8;
-  font-size: 12px;
-  font-weight: 570;
-}
-
-.source-privacy p {
-  max-width: 850px;
-  margin: 6px 0 0;
-  color: #747e73;
-  font-size: 12px;
-  line-height: 1.6;
-}
-
-.source-links {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 10px;
-  margin-top: 14px;
-}
-
-.source-links button {
-  display: grid;
-  grid-template-columns: 28px minmax(0, 1fr) auto;
-  gap: 8px;
-  padding: 13px 14px;
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  color: #8e998c;
-  background: transparent;
-  text-align: left;
-  cursor: pointer;
-}
-
-.source-links button:hover {
-  border-color: rgba(183, 243, 107, 0.2);
-}
-
-.source-links button > span {
-  grid-row: 1 / 3;
-  color: #535c53;
-  font-size: 13px;
-}
-
-.source-links strong {
-  font-size: 12px;
-  font-weight: 570;
-}
-
-.source-links small {
-  grid-column: 2;
-  color: #535c53;
-  font-size: 13px;
-}
-
-.source-links svg {
-  grid-row: 1 / 3;
-  grid-column: 3;
-  align-self: center;
-  color: var(--accent);
 }
 
 .source-status strong {
@@ -10309,7 +10097,6 @@ html[data-theme="light"]
 html[data-theme="light"]
   :is(
     .provider-preview,
-    .source-privacy,
     .pricing-explainer,
     .config-preset-strip,
     .trace-analysis-callout,
@@ -10350,10 +10137,6 @@ html[data-theme="light"]
     .trace-metric-label > i b,
     .trace-inspector-heading p,
     .trace-empty-state,
-    .source-guide-button,
-    .source-kind,
-    .source-row > p,
-    .source-links button,
     .text-button,
     .docs-link,
     .provider-preset-list > button,
@@ -10479,12 +10262,6 @@ html[data-theme="light"]
     .trace-insight p,
     .trace-no-issues,
     .trace-empty-state p,
-    .sources-table-head,
-    .source-row-metric i,
-    .source-row-origin code,
-    .source-privacy p,
-    .source-links button > span,
-    .source-links small,
     .provider-active-actions > span,
     .provider-section-title > span,
     .provider-preset-list small,

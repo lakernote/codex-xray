@@ -24,4 +24,22 @@ if (unique.size !== 1) {
   throw new Error(`Version mismatch: ${JSON.stringify(versions)}`);
 }
 
+const tagFlag = process.argv.indexOf("--tag");
+if (tagFlag !== -1) {
+  const tag = process.argv[tagFlag + 1];
+  if (!tag) {
+    throw new Error("Missing value after --tag");
+  }
+  if (!tag.startsWith("v")) {
+    throw new Error(`Release tag must start with v: ${tag}`);
+  }
+
+  const taggedVersion = tag.slice(1);
+  if (taggedVersion !== versions.packageJson) {
+    throw new Error(
+      `Release tag ${tag} does not match application version ${versions.packageJson}`,
+    );
+  }
+}
+
 console.log(`Version ${versions.packageJson} is consistent.`);

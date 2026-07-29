@@ -731,7 +731,7 @@ pub fn build_extension_usage_cached(
         .map(|((category, name, server), mut usage)| {
             usage
                 .occurrences
-                .sort_by(|left, right| right.timestamp_ms.cmp(&left.timestamp_ms));
+                .sort_by_key(|occurrence| std::cmp::Reverse(occurrence.timestamp_ms));
             let occurrences = usage
                 .occurrences
                 .into_iter()
@@ -2862,21 +2862,20 @@ fn parse_trace_file(
             if failed {
                 failed_tool_calls += 1;
             }
-            if let Some(call_id) = payload.get("call_id").and_then(Value::as_str) {
-                if let Some((turn_id, event_index)) = pending_calls.remove(call_id)
-                    && let Some(event) = turns
-                        .get_mut(&turn_id)
-                        .and_then(|turn| turn.tool_events.get_mut(event_index))
-                {
-                    event.completed_source_order = Some(source_order);
-                    event.completed_at_ms = timestamp.as_deref().and_then(timestamp_millis);
-                    event.result_source_type = Some(format!("response_item.{payload_type}"));
-                    event.failed = failed;
-                    event.output_bytes = line.len() as u64;
-                    event.exit_code = exit_code;
-                    event.result_fields = result_fields;
-                    event.result_json = result_json;
-                }
+            if let Some(call_id) = payload.get("call_id").and_then(Value::as_str)
+                && let Some((turn_id, event_index)) = pending_calls.remove(call_id)
+                && let Some(event) = turns
+                    .get_mut(&turn_id)
+                    .and_then(|turn| turn.tool_events.get_mut(event_index))
+            {
+                event.completed_source_order = Some(source_order);
+                event.completed_at_ms = timestamp.as_deref().and_then(timestamp_millis);
+                event.result_source_type = Some(format!("response_item.{payload_type}"));
+                event.failed = failed;
+                event.output_bytes = line.len() as u64;
+                event.exit_code = exit_code;
+                event.result_fields = result_fields;
+                event.result_json = result_json;
             }
         }
     }
@@ -3484,29 +3483,28 @@ fn read_paths(tool_name: &str, input: &Value) -> BTreeSet<String> {
             }
         }
     }
-    if tool_name.ends_with("exec_command") {
-        if let Some(command) = parsed.get("cmd").and_then(Value::as_str)
-            && command_reads_files(command)
-        {
-            for token in command.split_whitespace() {
-                let token = token.trim_matches(|character: char| {
-                    matches!(
-                        character,
-                        '\'' | '"' | '`' | ',' | ';' | '(' | ')' | '[' | ']' | '{' | '}'
-                    )
-                });
-                if looks_like_path(token) {
-                    let path = Path::new(token);
-                    let normalized = if path.is_relative() {
-                        workdir
-                            .as_ref()
-                            .map(|workdir| workdir.join(path))
-                            .unwrap_or_else(|| path.to_path_buf())
-                    } else {
-                        path.to_path_buf()
-                    };
-                    output.insert(short_path(&normalized.to_string_lossy()));
-                }
+    if tool_name.ends_with("exec_command")
+        && let Some(command) = parsed.get("cmd").and_then(Value::as_str)
+        && command_reads_files(command)
+    {
+        for token in command.split_whitespace() {
+            let token = token.trim_matches(|character: char| {
+                matches!(
+                    character,
+                    '\'' | '"' | '`' | ',' | ';' | '(' | ')' | '[' | ']' | '{' | '}'
+                )
+            });
+            if looks_like_path(token) {
+                let path = Path::new(token);
+                let normalized = if path.is_relative() {
+                    workdir
+                        .as_ref()
+                        .map(|workdir| workdir.join(path))
+                        .unwrap_or_else(|| path.to_path_buf())
+                } else {
+                    path.to_path_buf()
+                };
+                output.insert(short_path(&normalized.to_string_lossy()));
             }
         }
     }

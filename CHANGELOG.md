@@ -4,6 +4,9 @@ All notable user-visible changes are recorded here.
 
 ## [Unreleased]
 
+- Added release tag/version validation and full quality gates before packaging.
+- Added Clippy and npm dependency auditing to CI.
+- Removed the retired data-source view and its bundled resources.
 - Added effective-dated custom pricing versions.
 - Added real Provider connection verification with latency and HTTP status.
 - Added task status view and tray task summary.

@@ -1,16 +1,47 @@
 name: Draft release
 
 on:
-  workflow_dispatch:
   push:
     tags:
       - "v*"
 
-permissions:
-  contents: write
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
+  verify:
+    name: Verify release
+    runs-on: macos-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+      - run: npm ci
+      - run: npm run version:check -- --tag "${{ github.ref_name }}"
+      - run: npm run check
+      - run: npm run build
+      - run: npm audit --audit-level=high
+      - run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+      - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
+      - run: cargo test --manifest-path src-tauri/Cargo.toml --locked
+
   publish:
+    name: Build ${{ matrix.platform }}
+    needs: verify
+    environment: release
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -42,14 +73,15 @@ jobs:
         with:
           workspaces: "./src-tauri -> target"
       - run: npm ci
-      - run: npm run version:check
       - uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APPLE_SIGNING_IDENTITY: ${{ matrix.platform == 'macos-latest' && '-' || '' }}
         with:
           tagName: "v__VERSION__"
           releaseName: "Codex X-Ray v__VERSION__"
           releaseBody: "See CHANGELOG.md and the attached installers."
           releaseDraft: true
-          prerelease: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          retryAttempts: 2
           args: ${{ matrix.args }}

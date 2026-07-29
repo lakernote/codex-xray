@@ -38,10 +38,6 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "shortDescription": "See, understand, and configure every layer of Codex.",
-    "resources": {
-      "../docs/data-sources.zh-CN.md": "docs/data-sources.zh-CN.md",
-      "../docs/data-sources.en.md": "docs/data-sources.en.md"
-    }
+    "shortDescription": "See, understand, and configure every layer of Codex."
   }
 }

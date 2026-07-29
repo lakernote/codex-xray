@@ -18,7 +18,9 @@ npm ci
 npm run version:check
 npm run check
 npm run build
+npm audit --audit-level=high
 cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
 cargo test --manifest-path src-tauri/Cargo.toml --locked
 ```
 
@@ -32,7 +34,14 @@ Update the same semantic version in:
 - `src-tauri/tauri.conf.json`
 - `src-tauri/Cargo.toml`
 
-Update `CHANGELOG.md`, merge to `main`, then push `v<version>`. The `Draft release` workflow follows Tauri's official GitHub pipeline and creates draft macOS Apple Silicon, macOS Intel, Windows, and Linux artifacts. Review every artifact before publishing the GitHub Release.
+Update `CHANGELOG.md`, merge to `main`, wait for CI, then create and push an annotated `v<version>` tag:
+
+```bash
+git tag -a v0.1.0 -m "Codex X-Ray v0.1.0"
+git push origin v0.1.0
+```
+
+The tag must exactly match the application version. The `Draft release` workflow reruns TypeScript, dependency, format, Clippy, and Rust test gates before creating draft macOS Apple Silicon, macOS Intel, Windows, and Linux artifacts. Configure a protected GitHub `release` environment before the first public release, then review every artifact before publishing the GitHub Release.
 
 Unsigned development artifacts are suitable for internal verification only. Public macOS and Windows distribution should add platform signing and macOS notarization first.
 

@@ -17,7 +17,7 @@ use cost_estimate::{
     CostEstimateSnapshot, ProjectTurnUsageDetail, ProjectUsageSnapshot, build_cost_estimate,
     build_project_turn_usage, build_project_usage,
 };
-use environment::{EnvironmentSnapshot, build_environment_snapshot};
+use environment::{EnvironmentRuntime, EnvironmentSnapshot, build_environment_snapshot};
 use pricing::{
     PricingApplyRequest, PricingConfigSnapshot, activate_pricing_config, pricing_config_snapshot,
     reset_pricing_config as reset_pricing_config_file, save_pricing_config,
@@ -34,7 +34,6 @@ use settings::{
 };
 use storage::{health as storage_health, read_cache, write_cache};
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
-use tauri::path::BaseDirectory;
 use tauri::tray::TrayIconBuilder;
 use tauri::{Manager, WindowEvent};
 use trace_analysis::{
@@ -103,11 +102,13 @@ async fn get_environment_snapshot(
             &raw,
             &provider,
             &settings,
-            client.codex_version(),
-            client.codex_binary(),
-            &app_data_dir,
-            &database_path,
-            storage,
+            EnvironmentRuntime {
+                codex_version: client.codex_version(),
+                codex_binary: client.codex_binary(),
+                xray_data_path: &app_data_dir,
+                xray_sqlite_path: &database_path,
+                storage,
+            },
         ))
     })
     .await
@@ -224,28 +225,6 @@ fn reveal_local_path(path: String, state: tauri::State<'_, UsageState>) -> Resul
     }
 
     reveal_target(&target)
-}
-
-#[tauri::command]
-fn open_data_guide(app: tauri::AppHandle, locale: String) -> Result<(), String> {
-    let filename = if locale == "en-US" {
-        "data-sources.en.md"
-    } else {
-        "data-sources.zh-CN.md"
-    };
-    let bundled = app
-        .path()
-        .resolve(format!("docs/{filename}"), BaseDirectory::Resource)
-        .map_err(|error| format!("Unable to locate the data guide: {error}"))?;
-    let development = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../docs")
-        .join(filename);
-    let target = if bundled.exists() {
-        bundled
-    } else {
-        development
-    };
-    launch_target(target.as_os_str())
 }
 
 #[tauri::command]
@@ -969,8 +948,7 @@ pub fn run() {
             get_environment_snapshot,
             update_tray_summary,
             open_external,
-            reveal_local_path,
-            open_data_guide
+            reveal_local_path
         ])
         .run(tauri::generate_context!())
         .expect("error while running Codex X-Ray");
