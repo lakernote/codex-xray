@@ -31,6 +31,7 @@ jobs:
       tag: ${{ steps.metadata.outputs.tag }}
       prerelease: ${{ steps.metadata.outputs.prerelease }}
       matrix: ${{ steps.metadata.outputs.matrix }}
+      has_builds: ${{ steps.metadata.outputs.has_builds }}
       tag_exists: ${{ steps.metadata.outputs.tag_exists }}
     steps:
       - uses: actions/checkout@v7
@@ -114,13 +115,16 @@ jobs:
           has_asset "_x64-setup.exe" || add_target windows-latest "--bundles nsis"
 
           if [ "$(jq 'length' <<< "${include}")" -eq 0 ]; then
-            echo "::error::Draft ${tag} already contains every installer."
-            exit 1
+            echo "::notice::Draft ${tag} already contains every installer; no platform rebuild is needed."
+            has_builds=false
+          else
+            has_builds=true
           fi
 
           echo "tag=${tag}" >> "$GITHUB_OUTPUT"
           echo "tag_exists=${tag_exists}" >> "$GITHUB_OUTPUT"
           echo "prerelease=${prerelease}" >> "$GITHUB_OUTPUT"
+          echo "has_builds=${has_builds}" >> "$GITHUB_OUTPUT"
           echo "matrix=$(jq -cn --argjson include "${include}" '{include: $include}')" >> "$GITHUB_OUTPUT"
       - name: Check out existing release tag
         if: steps.metadata.outputs.tag_exists == 'true'
@@ -185,6 +189,7 @@ jobs:
     needs:
       - prepare
       - verify
+    if: needs.prepare.outputs.has_builds == 'true'
     environment: release
     permissions:
       contents: write
