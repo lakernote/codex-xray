@@ -17,10 +17,10 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-2f4f20.svg" alt="MIT License" /></a>
 </p>
 
-Codex X-Ray 是一个本地优先的 Codex 可视化助手。它连接当前安装的 Codex App Server，并按需解析本机 Session，把分散的额度、Token、成本、项目、回合、LLM 与工具调用还原成可以核对的账本和 Timeline。
+Codex X-Ray 是 Codex 的用量与执行分析工具。它展示额度和 Token，按项目、对话和 Turn 统计成本，并还原 LLM 与工具调用的执行 Timeline。
 
 > [!IMPORTANT]
-> Codex X-Ray 是独立的非官方开源项目，与 OpenAI 无隶属、合作或背书关系。目前处于早期版本，数据结构会随 Codex 接口演进。
+> Codex X-Ray 是非官方开源项目，与 OpenAI 无隶属或背书关系。
 
 ## 界面
 

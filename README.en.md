@@ -17,10 +17,10 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-2f4f20.svg" alt="MIT License" /></a>
 </p>
 
-Codex X-Ray is a local-first visual companion for Codex. It connects to the installed Codex App Server and inspects local Sessions on demand, turning scattered quota, token, cost, project, turn, LLM, and tool-call data into auditable ledgers and timelines.
+Codex X-Ray is a usage and execution analysis tool for Codex. It shows quota and tokens, tracks cost by project, conversation, and turn, and reconstructs the execution timeline of LLM and tool calls.
 
 > [!IMPORTANT]
-> Codex X-Ray is an independent, unofficial open-source project. It is not affiliated with, sponsored by, or endorsed by OpenAI. The project is in an early stage and may need to adapt as Codex interfaces evolve.
+> Codex X-Ray is an unofficial open-source project and is not affiliated with or endorsed by OpenAI.
 
 ## Screenshots
 
