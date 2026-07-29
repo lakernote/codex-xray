@@ -1,16 +1,15 @@
 # Release and update pipeline
 
-The repository can build draft installers on GitHub today. In-app automatic update must remain disabled until the repository URL and signing identity are final.
+The repository can build draft installers on GitHub today. In-app automatic update must remain disabled until signing, notarization, and update verification are configured.
 
-## 1. Publish the repository
+## 1. Repository settings
 
-1. Create a public GitHub repository for Codex X-Ray.
-2. Keep the default branch as `main`.
-3. Enable GitHub Actions with read/write workflow permission.
-4. Enable private vulnerability reporting.
-5. Add the non-affiliation disclaimer to the GitHub description.
+The public repository is <https://github.com/lakernote/codex-xray> and its default branch is `main`.
 
-Do not push local databases, Session files, credentials, `.playwright-cli`, `dist`, `node_modules`, or `src-tauri/target`.
+- Keep GitHub Actions enabled.
+- Enable private vulnerability reporting.
+- Keep the non-affiliation disclaimer in the repository description and README.
+- Do not push local databases, Session files, credentials, `.playwright-cli`, `dist`, `node_modules`, or `src-tauri/target`.
 
 ## 2. Validate a change
 

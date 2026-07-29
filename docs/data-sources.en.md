@@ -131,7 +131,7 @@ A custom model price is a flat input, cached-input, and output rate. It replaces
 
 ## Execution inspection
 
-Execution inspection stores only the structured aggregates needed to reconstruct real calls. It does not store message text, complete patches, file contents returned by reads, or complete tool output. To support execution learning, it persists bounded and redacted command, script, and argument summaries.
+Execution inspection reads and displays user messages, assistant messages, and readable summaries on demand from the original Session selected by the user. SQLite stores only the structured aggregates needed to reconstruct real calls; it does not store those message bodies, complete patches, file contents returned by reads, or complete tool output. To support execution learning, it persists bounded and redacted command, script, and argument summaries.
 
 ### Session detail hierarchy
 
@@ -143,7 +143,7 @@ The execution workbench separates catalog loading from inspection. Opening the v
 4. **Session summary:** total tokens, turns, tool calls, input/cache, output/reasoning, context peak/window, compactions, and API-equivalent cost.
 5. **Per-turn data:** input, fresh input, cache reads, output, reasoning output, context peak, context-window utilization, context change, compactions, duration, and cost.
 6. **Factual structured timeline:** displays every recorded `task_started`, assistant `reasoning/message` phase, `token_count`, `tool_search_call`, structured tool call/result, `context_compacted`, and `task_complete` event in session order. The previous 80-event cap has been removed.
-7. **LLM events:** each `token_count` is numbered and shown as a model-response usage settlement with model, fresh input, cached input, output, reasoning output, total, context window, context delta from the previous call, cache-hit rate, and per-call API-equivalent cost. `reasoning` and assistant `commentary/final_answer` records expose only phase, part counts, and record bytes—never their text.
+7. **LLM events:** each `token_count` is numbered and shown as a model-response usage settlement with model, fresh input, cached input, output, reasoning output, total, context window, context delta from the previous call, cache-hit rate, and per-call API-equivalent cost. User messages, assistant `commentary/final_answer`, and readable reasoning summaries present in the Session can be displayed on demand from the original file but are not written to SQLite. Encrypted reasoning can expose only that a record exists and its size; its text cannot be reconstructed.
 8. **Event taxonomy:** structured tool names, MCP namespaces, and safe arguments classify events as LLM, MCP, CLI, Skill, file, browser/automation, agent, context/lifecycle, or other tool. Classification is only a filter; the original tool name remains visible.
 9. **MCP events:** show the exact tool name, server derived from the `mcp__*` namespace, and a redacted top-level argument summary.
 10. **Call audit details:** each tool event can expand to show `call_id`, raw `response_item` type, exact start/end time, a recursively redacted input tree, and allowlisted result metadata such as result shape, item count, status, exit code, duration, and chunk/session/cell IDs.
@@ -194,7 +194,8 @@ Because Codex X-Ray's App Server is isolated from the Codex App process, another
 Codex X-Ray:
 
 - does not read `auth.json`;
-- does not store email, prompts, response text, complete patches, read file contents, or full tool output;
+- can display prompts, response text, and readable summaries on demand from the selected original Session, but does not write those message bodies to the SQLite index;
+- does not store email, complete patches, read file contents, or full tool output;
 - stores only bounded, redacted tool-argument, command, and script summaries for timelines the user explicitly analyzes;
 - does not modify sessions or Codex databases;
 - updates only user-selected configuration keys through official `config/batchWrite` after a diff preview and explicit confirmation;
