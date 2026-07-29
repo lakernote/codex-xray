@@ -4,6 +4,7 @@ All notable user-visible changes are recorded here.
 
 ## [Unreleased]
 
+- Replaced manual release tags with a guided GitHub Actions prerelease/release workflow.
 - Added release tag/version validation and full quality gates before packaging.
 - Added Clippy and npm dependency auditing to CI.
 - Removed the retired data-source view and its bundled resources.

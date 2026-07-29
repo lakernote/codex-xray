@@ -1,22 +1,94 @@
-name: Draft release
+name: Release
 
 on:
-  push:
-    tags:
-      - "v*"
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: "Release type"
+        required: true
+        type: choice
+        default: prerelease
+        options:
+          - prerelease
+          - release
+      version:
+        description: "Version without v (for example 0.2.0-beta.1 or 0.2.0)"
+        required: true
+        type: string
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release
   cancel-in-progress: false
 
 jobs:
+  prepare:
+    name: Prepare ${{ inputs.channel }} v${{ inputs.version }}
+    runs-on: macos-latest
+    environment: release
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.metadata.outputs.tag }}
+      prerelease: ${{ steps.metadata.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - name: Resolve release metadata
+        id: metadata
+        env:
+          RELEASE_CHANNEL: ${{ inputs.channel }}
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          tag="v${RELEASE_VERSION}"
+          if git rev-parse --verify --quiet "refs/tags/${tag}" >/dev/null; then
+            echo "::error::Tag ${tag} already exists."
+            exit 1
+          fi
+          if [ "${RELEASE_CHANNEL}" = "prerelease" ]; then
+            prerelease=true
+          else
+            prerelease=false
+          fi
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "prerelease=${prerelease}" >> "$GITHUB_OUTPUT"
+      - name: Synchronize application version
+        env:
+          RELEASE_CHANNEL: ${{ inputs.channel }}
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: npm run version:set -- "$RELEASE_VERSION" --channel "$RELEASE_CHANNEL"
+      - run: npm run version:check -- --tag "${{ steps.metadata.outputs.tag }}"
+      - run: git diff --check
+      - name: Commit version and create tag
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          RELEASE_TAG: ${{ steps.metadata.outputs.tag }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package.json package-lock.json src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/tauri.conf.json
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: prepare ${RELEASE_TAG}"
+          fi
+          git tag -a "${RELEASE_TAG}" -m "Codex X-Ray ${RELEASE_TAG}"
+          git push --atomic origin "HEAD:refs/heads/${DEFAULT_BRANCH}" "refs/tags/${RELEASE_TAG}"
+
   verify:
     name: Verify release
+    needs: prepare
     runs-on: macos-latest
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
       - uses: actions/setup-node@v6
         with:
           node-version: "22"
@@ -28,7 +100,7 @@ jobs:
         with:
           workspaces: "./src-tauri -> target"
       - run: npm ci
-      - run: npm run version:check -- --tag "${{ github.ref_name }}"
+      - run: npm run version:check -- --tag "${{ needs.prepare.outputs.tag }}"
       - run: npm run check
       - run: npm run build
       - run: npm audit --audit-level=high
@@ -38,7 +110,9 @@ jobs:
 
   publish:
     name: Build ${{ matrix.platform }}
-    needs: verify
+    needs:
+      - prepare
+      - verify
     environment: release
     permissions:
       contents: write
@@ -57,6 +131,8 @@ jobs:
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
       - name: Install Linux dependencies
         if: matrix.platform == 'ubuntu-22.04'
         run: |
@@ -78,10 +154,10 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           APPLE_SIGNING_IDENTITY: ${{ matrix.platform == 'macos-latest' && '-' || '' }}
         with:
-          tagName: "v__VERSION__"
-          releaseName: "Codex X-Ray v__VERSION__"
+          tagName: ${{ needs.prepare.outputs.tag }}
+          releaseName: "Codex X-Ray ${{ needs.prepare.outputs.tag }}"
           releaseBody: "See CHANGELOG.md and the attached installers."
           releaseDraft: true
-          prerelease: ${{ contains(github.ref_name, '-') }}
+          prerelease: ${{ needs.prepare.outputs.prerelease }}
           retryAttempts: 2
           args: ${{ matrix.args }}

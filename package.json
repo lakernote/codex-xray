@@ -8,6 +8,7 @@
     "build": "tsc --noEmit && vite build",
     "check": "tsc --noEmit",
     "version:check": "node scripts/check-version.mjs",
+    "version:set": "node scripts/set-version.mjs",
     "tauri": "tauri",
     "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml"
   },

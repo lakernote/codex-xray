@@ -7,6 +7,7 @@ The repository can build draft installers on GitHub today. In-app automatic upda
 The public repository is <https://github.com/lakernote/codex-xray> and its default branch is `main`.
 
 - Keep GitHub Actions enabled.
+- In **Settings → Actions → General → Workflow permissions**, allow read and write access so the release workflow can commit the version and create its tag.
 - Enable private vulnerability reporting.
 - Keep the non-affiliation disclaimer in the repository description and README.
 - Do not push local databases, Session files, credentials, `.playwright-cli`, `dist`, `node_modules`, or `src-tauri/target`.
@@ -26,22 +27,18 @@ cargo test --manifest-path src-tauri/Cargo.toml --locked
 
 The `CI` workflow runs the same gates for `main` and pull requests.
 
-## 3. Cut a draft release
+## 3. Create a release
 
-Update the same semantic version in:
+Update `CHANGELOG.md`, merge it to `main`, and wait for CI. Then open **GitHub → Actions → Release → Run workflow**.
 
-- `package.json`
-- `src-tauri/tauri.conf.json`
-- `src-tauri/Cargo.toml`
+Choose one release type and enter the version without a `v` prefix:
 
-Update `CHANGELOG.md`, merge to `main`, wait for CI, then create and push an annotated `v<version>` tag:
+- `prerelease`: use a semantic prerelease version such as `0.2.0-beta.1`.
+- `release`: use a stable semantic version such as `0.2.0`.
 
-```bash
-git tag -a v0.1.0 -m "Codex X-Ray v0.1.0"
-git push origin v0.1.0
-```
+The workflow synchronizes the version across the npm and Tauri manifests, commits that version to `main`, creates the annotated `v<version>` tag, reruns every quality gate, and builds draft macOS Apple Silicon, macOS Intel, Windows, and Linux artifacts. Prerelease versions are marked as GitHub prereleases automatically.
 
-The tag must exactly match the application version. The `Draft release` workflow reruns TypeScript, dependency, format, Clippy, and Rust test gates before creating draft macOS Apple Silicon, macOS Intel, Windows, and Linux artifacts. Configure a protected GitHub `release` environment before the first public release, then review every artifact before publishing the GitHub Release.
+Configure a protected GitHub `release` environment before the first public release. Review every draft artifact, then publish the GitHub Release manually. A failed build can leave a version commit and tag without a draft release; fix the failure and rerun the workflow only after deleting the failed tag or choosing a new version.
 
 Unsigned development artifacts are suitable for internal verification only. Public macOS and Windows distribution should add platform signing and macOS notarization first.
 

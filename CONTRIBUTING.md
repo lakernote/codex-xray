@@ -26,10 +26,12 @@ cargo test --manifest-path src-tauri/Cargo.toml --locked
 
 ## Versioning
 
-Keep these three versions identical:
+Open **Actions → Release → Run workflow** to create a prerelease or stable release. Enter the semantic version once; the workflow synchronizes:
 
 - `package.json`
+- `package-lock.json`
 - `src-tauri/tauri.conf.json`
 - `src-tauri/Cargo.toml`
+- `src-tauri/Cargo.lock`
 
-`npm run version:check` enforces this in CI.
+`npm run version:check` enforces version consistency in CI. Do not create release tags manually.
