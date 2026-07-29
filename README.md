@@ -1,15 +1,15 @@
 <p align="center">
-  <img src="src-tauri/icons/icon.svg" width="96" height="96" alt="Codex X-Ray 图标" />
+  <img src="src-tauri/icons/icon.svg" width="96" height="96" alt="Codex X-Ray icon" />
 </p>
 
 <h1 align="center">Codex X-Ray</h1>
 
 <p align="center">
-  看清 Codex 的用量、成本、上下文与每一步执行。
+  Understand Codex usage, cost, context, and every execution step.
 </p>
 
 <p align="center">
-  <a href="README.en.md">English</a> · <strong>简体中文</strong>
+  <strong>English</strong> · <a href="README.zh-CN.md">简体中文</a>
 </p>
 
 <p align="center">
@@ -17,73 +17,67 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-2f4f20.svg" alt="MIT License" /></a>
 </p>
 
-Codex X-Ray 是 Codex 的用量与执行分析工具。它展示额度和 Token，按项目、对话和 Turn 统计成本，并还原 LLM 与工具调用的执行 Timeline。
+Codex X-Ray is a usage and execution analysis tool for Codex. It shows quota and tokens, tracks cost by project, conversation, and turn, and reconstructs the execution timeline of LLM and tool calls.
 
 > [!IMPORTANT]
-> Codex X-Ray 是非官方开源项目，与 OpenAI 无隶属或背书关系。
+> Codex X-Ray is an unofficial open-source project and is not affiliated with or endorsed by OpenAI.
 
-## 界面
+## Screenshots
 
-### 用量概览
+### Usage overview
 
-官方额度与本地 Session 用量分开呈现，同时展示输入、缓存、输出、年度活动和 API 等价成本。
+Official quota and local Session usage remain separate, with input, cache, output, yearly activity, and API-equivalent cost shown together.
 
-![Codex X-Ray 用量概览](docs/assets/usage-overview.zh-CN.png)
+![Codex X-Ray usage overview](docs/assets/usage-overview.en.png)
 
-### 项目、对话与回合账本
+### Execution timeline
 
-按原始工作目录组织项目，继续下钻到对话和 Turn，核对 Token 与成本去向。
+Follow local preparation, user input, LLM output, tool request, Codex execution, result write-back, token accounting, and turn completion in Session order.
 
-![Codex X-Ray 项目用量账本](docs/assets/project-usage.zh-CN.png)
+![Codex X-Ray execution timeline](docs/assets/execution-trace.en.png)
 
-### 真实执行 Timeline
+Every screenshot is generated from a fictional project and simulated Session data. No real user path, conversation, account, or key is included.
 
-按 Session 中的顺序解释本地准备、用户输入、LLM 返回、工具请求、Codex 执行、结果写回、Token 结算和回合结束。
+## Highlights
 
-![Codex X-Ray 执行 Timeline](docs/assets/execution-trace.zh-CN.png)
+- **Usage and cost** — inspect today, daily, monthly, model, and project-level input, cache, output, total tokens, and API-equivalent cost.
+- **Execution trace** — navigate project → conversation → turn and inspect context, cache, compaction, LLM, CLI, MCP, Skill, browser, automation, and sub-agent events.
+- **Task status** — group running, approval-blocked, input-blocked, failed, interrupted, and recently completed Codex tasks while showing the source of each status.
+- **Visual console** — understand and preview model behavior, approvals, sandboxing, network access, Memory, compaction, tools, and Provider settings before writing through the official configuration API.
+- **Provider switching** — configure OpenAI, Qwen, Doubao, Qianfan-hosted models, MiniMax, StepFun, and custom Responses providers.
+- **Environment diagnostics** — inspect the Codex CLI/App Server, key directories, SQLite, Provider, MCP, Skills, and Plugins without reading credential values.
+- **Chinese/English and light/dark themes** — persisted locally.
 
-以上截图全部由虚构项目和模拟 Session 数据生成，不包含真实用户路径、对话、账号或密钥。
-
-## 主要能力
-
-- **用量与成本**：查看今日、按日、按月、按模型和按项目的输入、缓存、输出、总 Token 与 API 等价成本。
-- **执行追踪**：按项目 → 对话 → Turn 展示上下文、缓存、压缩、LLM、CLI、MCP、Skill、浏览器、自动化和子 Agent 事件。
-- **任务状态**：汇总运行中、等待审批、等待输入、失败、中断和最近完成的 Codex 任务，并标明状态来源。
-- **可视化控制台**：解释并预览模型行为、审批、沙箱、联网、Memory、压缩、工具与 Provider 配置，确认后才通过官方配置接口写入。
-- **Provider 切换**：提供 OpenAI、Qwen、豆包、千帆托管模型、MiniMax、StepFun 和自定义 Responses Provider 预设。
-- **环境诊断**：检查 Codex CLI/App Server、关键目录、SQLite、Provider、MCP、Skills 和 Plugins，不读取凭据值。
-- **中英文与明暗主题**：默认中文亮色，可在应用内切换并保存在本机。
-
-## 数据如何流动
+## Data flow
 
 ```text
-Codex App Server ──账户、额度、对话目录、配置──┐
-                                                ├─ Rust 本地分析 ─ SQLite 索引 ─ React 界面
-$CODEX_HOME/sessions ──只读 JSONL 事件─────────┘
+Codex App Server ──account, quota, catalog, configuration──┐
+                                                          ├─ local Rust analysis ─ SQLite index ─ React UI
+$CODEX_HOME/sessions ──read-only JSONL events─────────────┘
 ```
 
-- 官方账户值保持原始口径；本地推导和成本估算会明确标注。
-- 原始 Codex Session、数据库和任务内容始终只读。
-- 对话只在用户选择后分析；打开目录不会自动解析全部历史。
-- 索引存放在 Codex X-Ray 自己的应用数据目录，并使用 SQLite WAL 增量更新。
+- Official values keep their original semantics; local derivations and cost estimates are labeled.
+- Original Codex Sessions, databases, and task content remain read-only.
+- Conversations are analyzed only after selection; opening the catalog does not parse all history.
+- The index lives in Codex X-Ray's own application data directory and is incrementally updated with SQLite WAL.
 
-## 隐私与安全
+## Privacy and security
 
-- 不读取 `auth.json`，不代理或拦截 Codex 请求，也不上传本地分析数据。
-- 执行详情会按需从原始 Session 显示用户消息、助手消息和可读摘要；这些正文不写入 SQLite 索引。
-- SQLite 只保存用量、结构化阶段、来源行号，以及限长且脱敏的命令、参数和结果元数据；不保存完整工具输出、完整补丁或读取到的文件内容。
-- Provider 只保存环境变量名。连接测试时，Rust 后端临时读取对应 Key；Key 不返回前端、不写日志、不进入进程参数。
-- 配置修改必须先查看差异并再次确认，同时保留可恢复的上一状态。
+- Codex X-Ray does not read `auth.json`, proxy or intercept Codex traffic, or upload local analysis.
+- Execution details can display user messages, assistant messages, and readable summaries from the original Session on demand; message bodies are not written to the SQLite index.
+- SQLite stores usage, structured phases, source line references, and bounded/redacted command, argument, and result metadata. It does not store complete tool output, full patches, or files read by Codex.
+- Provider profiles store environment-variable names only. During an explicit connection test, the Rust backend reads the selected key transiently; the key is not returned to the webview, logged, or passed through process arguments.
+- Configuration changes require a visible diff and explicit confirmation, with a recoverable previous state.
 
-更完整的字段来源、计算公式和边界见[中文数据说明](docs/data-sources.zh-CN.md)。安全问题请阅读 [SECURITY.md](SECURITY.md)。
+See the [English data source guide](docs/data-sources.en.md) for field sources, formulas, and limitations. See [SECURITY.md](SECURITY.md) for vulnerability reporting.
 
-## 从源码运行
+## Run from source
 
-当前尚未发布签名安装包。开发环境需要：
+Signed installers are not published yet. Development requires:
 
-- Node.js 22（最低 18）
+- Node.js 22 (18 minimum)
 - Rust stable
-- 已安装并登录的 Codex
+- An installed and authenticated Codex
 
 ```bash
 git clone https://github.com/lakernote/codex-xray.git
@@ -92,7 +86,7 @@ npm ci
 npm run tauri dev
 ```
 
-构建与验证：
+Build and verify:
 
 ```bash
 npm run version:check
@@ -102,23 +96,14 @@ npm run test:rust
 npm run tauri build
 ```
 
-如果 `codex` 不在 `PATH`，应用会尝试检测 Codex/ChatGPT App 的内置 CLI；也可以通过 `CODEX_BIN` 指定可执行文件。
+If `codex` is not on `PATH`, Codex X-Ray attempts to detect the CLI bundled with the Codex/ChatGPT app. You can also set `CODEX_BIN` explicitly.
 
-## 当前边界
+## Current limitations
 
-- API 等价成本用于比较 Token 价值，不是 ChatGPT/Codex 订阅账单或实际扣款。
-- 独立 App Server 无法保证看到另一个 Codex App 进程的全部瞬时状态；界面会区分官方状态与本地事件推断。
-- Codex App Server 与 Session 格式仍可能变化，兼容性以当前安装版本为准。
-- 当前主要在 macOS 上验证；仓库提供 Windows、Linux 和 macOS 的 CI/草稿构建配置。
-
-## 项目文档
-
-- [数据来源与指标口径](docs/data-sources.zh-CN.md)
-- [English data source guide](docs/data-sources.en.md)
-- [贡献指南](CONTRIBUTING.md)
-- [发布流程](docs/releasing.md)
-- [安全策略](SECURITY.md)
-- [更新记录](CHANGELOG.md)
+- API-equivalent cost estimates token value; it is not a ChatGPT/Codex subscription bill or an actual charge.
+- A separate App Server cannot always observe every transient state inside another Codex App process. The UI distinguishes official states from local-event inference.
+- Codex App Server and Session formats may evolve; compatibility follows the locally installed version.
+- The project is currently validated primarily on macOS. CI and draft build configuration cover Windows, Linux, and macOS.
 
 ## License
 
