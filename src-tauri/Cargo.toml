@@ -1,6 +1,6 @@
 [package]
 name = "codex-xray"
-version = "0.1.0-beta.1"
+version = "0.1.0"
 description = "A local X-ray workbench for understanding and configuring Codex"
 authors = ["Codex X-Ray"]
 edition = "2024"
