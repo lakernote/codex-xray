@@ -1,3 +1,4 @@
+mod chat_bridge;
 mod codex;
 mod cost_estimate;
 mod environment;
@@ -12,6 +13,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 
+use chat_bridge::{ChatBridgeProvider, ChatBridgeState, ChatBridgeStatus};
 use codex::{AppServerClient, UsageSnapshot};
 use cost_estimate::{
     CostEstimateSnapshot, ProjectTurnUsageDetail, ProjectUsageSnapshot, build_cost_estimate,
@@ -24,8 +26,9 @@ use pricing::{
 };
 use provider::{
     ProviderApplyRequest, ProviderSnapshot, ProviderTestResult, build_apply_edits,
-    build_provider_snapshot, probe_provider, read_restore_point, restore_edits, restore_point,
-    save_restore_point,
+    build_provider_snapshot, delete_credential, enrich_provider_snapshot_with_bridge,
+    persist_request_credential, probe_provider, read_restore_point, restore_edits, restore_point,
+    rollback_credential, save_restore_point,
 };
 use settings::{
     SettingsApplyRequest, SettingsSnapshot, build_settings_edits, build_settings_snapshot,
@@ -74,6 +77,7 @@ fn update_tray_summary(
 #[tauri::command]
 async fn get_environment_snapshot(
     state: tauri::State<'_, UsageState>,
+    bridge: tauri::State<'_, ChatBridgeState>,
 ) -> Result<EnvironmentSnapshot, String> {
     let client = Arc::clone(&state.client);
     let codex_state_dir = state.codex_state_dir.clone();
@@ -81,6 +85,7 @@ async fn get_environment_snapshot(
     let database_path = state.database_path.clone();
     let provider_restore_path = state.provider_restore_path.clone();
     let settings_restore_path = state.settings_restore_path.clone();
+    let bridge = bridge.inner().clone();
 
     tauri::async_runtime::spawn_blocking(move || {
         let mut guard = client
@@ -95,7 +100,8 @@ async fn get_environment_snapshot(
 
         let client = guard.as_mut().expect("client is initialized");
         let raw = client.read_config().map_err(|error| error.to_string())?;
-        let provider = build_provider_snapshot(&raw, &provider_restore_path)?;
+        let mut provider = build_provider_snapshot(&raw, &provider_restore_path)?;
+        enrich_provider_snapshot_with_bridge(&mut provider, &bridge);
         let settings = build_settings_snapshot(&raw, &settings_restore_path)?;
         let storage = storage_health(&database_path)?;
         Ok(build_environment_snapshot(
@@ -165,6 +171,7 @@ fn open_external(url: String) -> Result<(), String> {
         "https://cloud.baidu.com/",
         "https://platform.minimaxi.com/",
         "https://platform.stepfun.com/",
+        "https://github.com/lakernote/codex-xray/releases",
     ];
     if url.contains(['\r', '\n']) || !allowed.iter().any(|prefix| url.starts_with(prefix)) {
         return Err("This link is not on the Codex X-Ray documentation allowlist".to_string());
@@ -566,10 +573,12 @@ async fn get_extension_usage(
 #[tauri::command]
 async fn get_provider_config(
     state: tauri::State<'_, UsageState>,
+    bridge: tauri::State<'_, ChatBridgeState>,
 ) -> Result<ProviderSnapshot, String> {
     let client = Arc::clone(&state.client);
     let codex_state_dir = state.codex_state_dir.clone();
     let restore_path = state.provider_restore_path.clone();
+    let bridge = bridge.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let mut guard = client
             .lock()
@@ -592,6 +601,7 @@ async fn get_provider_config(
             }
         };
         let mut snapshot = build_provider_snapshot(&raw, &restore_path)?;
+        enrich_provider_snapshot_with_bridge(&mut snapshot, &bridge);
         match guard
             .as_mut()
             .expect("client is initialized")
@@ -611,11 +621,13 @@ async fn get_provider_config(
 #[tauri::command]
 async fn apply_provider_config(
     state: tauri::State<'_, UsageState>,
+    bridge: tauri::State<'_, ChatBridgeState>,
     request: ProviderApplyRequest,
 ) -> Result<ProviderSnapshot, String> {
     let client = Arc::clone(&state.client);
     let codex_state_dir = state.codex_state_dir.clone();
     let restore_path = state.provider_restore_path.clone();
+    let bridge = bridge.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let mut guard = client
             .lock()
@@ -630,9 +642,41 @@ async fn apply_provider_config(
         let before_raw = client.read_config().map_err(|error| error.to_string())?;
         let before = build_provider_snapshot(&before_raw, &restore_path)?;
         let (edits, _) = build_apply_edits(&request)?;
-        client
-            .batch_write_config(edits, request.expected_version)
-            .map_err(|error| format!("Codex 拒绝了 Provider 配置变更：{error}"))?;
+        let credential_update = persist_request_credential(&request)?;
+        let bridge_update = if request.protocol == "chat_completions" {
+            let upstream_base_url = request
+                .base_url
+                .clone()
+                .ok_or_else(|| "Chat Completions Provider 缺少 API Base URL。".to_string())?;
+            match bridge.persist_provider(
+                &request.provider_id,
+                ChatBridgeProvider {
+                    upstream_base_url,
+                    credential_mode: request
+                        .credential_mode
+                        .clone()
+                        .unwrap_or_else(|| "none".to_string()),
+                    env_key: request.env_key.clone(),
+                    model: request.model.clone(),
+                    context_window: request.context_window,
+                },
+            ) {
+                Ok(update) => Some(update),
+                Err(error) => {
+                    rollback_credential(credential_update);
+                    return Err(error);
+                }
+            }
+        } else {
+            None
+        };
+        if let Err(error) = client.batch_write_config(edits, request.expected_version) {
+            if let Some(update) = bridge_update {
+                bridge.rollback_provider(update);
+            }
+            rollback_credential(credential_update);
+            return Err(format!("Codex 拒绝了 Provider 配置变更：{error}"));
+        }
         let after_raw = client.read_config().map_err(|error| error.to_string())?;
         let mut after = build_provider_snapshot(&after_raw, &restore_path)?;
         match client.fetch_models() {
@@ -643,10 +687,18 @@ async fn apply_provider_config(
         }
         save_restore_point(&restore_path, &restore_point(&before))?;
         after.restore_available = true;
+        enrich_provider_snapshot_with_bridge(&mut after, &bridge);
         Ok(after)
     })
     .await
     .map_err(|error| format!("Provider 配置写入任务异常：{error}"))?
+}
+
+#[tauri::command]
+async fn clear_provider_credential(provider_id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || delete_credential(&provider_id))
+        .await
+        .map_err(|error| format!("删除 Provider 凭据的后台任务异常：{error}"))?
 }
 
 #[tauri::command]
@@ -708,10 +760,12 @@ async fn test_provider_connection(
 #[tauri::command]
 async fn restore_provider_config(
     state: tauri::State<'_, UsageState>,
+    bridge: tauri::State<'_, ChatBridgeState>,
 ) -> Result<ProviderSnapshot, String> {
     let client = Arc::clone(&state.client);
     let codex_state_dir = state.codex_state_dir.clone();
     let restore_path = state.provider_restore_path.clone();
+    let bridge = bridge.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let target = read_restore_point(&restore_path)?;
         let mut guard = client
@@ -739,10 +793,16 @@ async fn restore_provider_config(
         }
         save_restore_point(&restore_path, &restore_point(&before))?;
         after.restore_available = true;
+        enrich_provider_snapshot_with_bridge(&mut after, &bridge);
         Ok(after)
     })
     .await
     .map_err(|error| format!("Provider 配置恢复任务异常：{error}"))?
+}
+
+#[tauri::command]
+fn get_chat_bridge_status(bridge: tauri::State<'_, ChatBridgeState>) -> ChatBridgeStatus {
+    bridge.status()
 }
 
 #[tauri::command]
@@ -873,6 +933,8 @@ pub fn run() {
             if let Err(error) = activate_pricing_config(&pricing_config_path) {
                 eprintln!("Codex X-Ray 单价设置未载入，将使用公开默认值：{error}");
             }
+            let chat_bridge =
+                ChatBridgeState::load(app_data_dir.join("chat-bridge-providers.json"))?;
 
             app.manage(UsageState {
                 client: Arc::new(Mutex::new(None)),
@@ -885,6 +947,8 @@ pub fn run() {
                 provider_restore_path: app_data_dir.join("provider-restore.json"),
                 settings_restore_path: app_data_dir.join("settings-restore.json"),
             });
+            app.manage(chat_bridge.clone());
+            tauri::async_runtime::spawn(chat_bridge::serve(chat_bridge));
 
             let open_item = MenuItem::with_id(
                 app,
@@ -939,8 +1003,10 @@ pub fn run() {
             analyze_trace_session,
             get_extension_usage,
             get_provider_config,
+            get_chat_bridge_status,
             test_provider_connection,
             apply_provider_config,
+            clear_provider_credential,
             restore_provider_config,
             get_codex_settings,
             apply_codex_settings,
@@ -950,6 +1016,16 @@ pub fn run() {
             open_external,
             reveal_local_path
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Codex X-Ray");
+        .build(tauri::generate_context!())
+        .expect("error while building Codex X-Ray")
+        .run(|app, event| {
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = event {
+                let _ = show_main(app);
+            }
+        });
+}
+
+pub fn run_credential_helper_if_requested() -> Option<i32> {
+    provider::credential_helper_exit_code()
 }

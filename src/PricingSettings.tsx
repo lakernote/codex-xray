@@ -387,7 +387,8 @@ export default function PricingSettings({
               </button>
             </header>
 
-            <div className="pricing-explainer">
+            <div className="pricing-dialog-body">
+              <div className="pricing-explainer">
               <strong>
                 {zh
                   ? "按事件日期选择单价版本"
@@ -398,9 +399,9 @@ export default function PricingSettings({
                   ? "保存新价格不会改写旧月份；这仍是“如果改走 API”的等价估算，不是 Codex 套餐账单。"
                   : "New prices do not rewrite earlier months. This remains an API-equivalent estimate, not a Codex plan bill."}
               </p>
-            </div>
+              </div>
 
-            <div className="pricing-version-controls">
+              <div className="pricing-version-controls">
               <label htmlFor="pricing-effective-from">
                 <span>{zh ? "生效日期" : "Effective date"}</span>
                 <input
@@ -416,9 +417,9 @@ export default function PricingSettings({
                   ? "同一天再次保存会替换当天版本；之前日期不受影响。"
                   : "Saving again for the same date replaces that day's version; earlier dates are unchanged."}
               </p>
-            </div>
+              </div>
 
-            <div className="pricing-add-model">
+              <div className="pricing-add-model">
               <label htmlFor="pricing-new-model">
                 {zh ? "添加其他模型" : "Add another model"}
               </label>
@@ -437,9 +438,9 @@ export default function PricingSettings({
                   {zh ? "添加" : "Add"}
                 </button>
               </div>
-            </div>
+              </div>
 
-            <div className="pricing-table" aria-busy={loading}>
+              <div className="pricing-table" aria-busy={loading}>
               <div className="pricing-table-header" aria-hidden="true">
                 <span>{zh ? "模型" : "Model"}</span>
                 <span>{zh ? "输入" : "Input"}</span>
@@ -545,9 +546,9 @@ export default function PricingSettings({
                   })
                 )}
               </div>
-            </div>
+              </div>
 
-            <div className="pricing-dialog-meta">
+              <div className="pricing-dialog-meta">
               <span>
                 {zh
                   ? `内置单价快照：${snapshot?.defaults_updated_at ?? "—"}`
@@ -558,10 +559,10 @@ export default function PricingSettings({
                   ? `${snapshot?.versions.length ?? 0} 个历史版本 · 当前自定义 ${customizedCount} 个模型`
                   : `${snapshot?.versions.length ?? 0} historical version${snapshot?.versions.length === 1 ? "" : "s"} · ${customizedCount} current custom model${customizedCount === 1 ? "" : "s"}`}
               </span>
-            </div>
+              </div>
 
-            {(snapshot?.versions.length ?? 0) > 0 && (
-              <details className="pricing-version-history">
+              {(snapshot?.versions.length ?? 0) > 0 && (
+                <details className="pricing-version-history">
                 <summary>
                   {zh
                     ? `查看 ${snapshot?.versions.length ?? 0} 个价格版本`
@@ -585,18 +586,19 @@ export default function PricingSettings({
                       </li>
                     ))}
                 </ol>
-              </details>
-            )}
+                </details>
+              )}
 
-            {(error || notice) && (
-              <p
-                className={error ? "pricing-message error" : "pricing-message"}
-                role={error ? "alert" : "status"}
-                aria-live="polite"
-              >
-                {error ?? notice}
-              </p>
-            )}
+              {(error || notice) && (
+                <p
+                  className={error ? "pricing-message error" : "pricing-message"}
+                  role={error ? "alert" : "status"}
+                  aria-live="polite"
+                >
+                  {error ?? notice}
+                </p>
+              )}
+            </div>
 
             <footer>
               <div className="pricing-reset-all">

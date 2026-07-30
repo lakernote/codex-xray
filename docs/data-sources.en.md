@@ -24,7 +24,7 @@ The Environment page combines three read-only fact sets:
 
 The “analysis database” shown by Environment is Codex X-Ray's own `codex-xray.sqlite`, not the Codex App SQLite state. X-Ray's App Server uses a separate `sqlite_home` for its runtime state. Environment diagnosis never reads `auth.json` and does not claim to attach to another Codex App process.
 
-## Provider configuration and domestic Responses endpoints
+## Provider configuration and Chat compatibility
 
 Current Codex custom Providers use `wire_api = "responses"`. “OpenAI compatible” is not treated as sufficient: a route is marked native or hosted Responses only when the vendor documents `/responses`, streaming events, and function tools.
 
@@ -33,11 +33,14 @@ Current Codex custom Providers use `wire_api = "responses"`. “OpenAI compatibl
 | OpenAI | Built into Codex | Built in | Codex sign-in | Does not add a custom Provider |
 | Alibaba Model Studio / Qwen | Native Responses | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `DASHSCOPE_API_KEY` | The existing public endpoint remains available; workspace endpoints are recommended |
 | Volcengine Ark / Doubao | Native Responses | `https://ark.cn-beijing.volces.com/api/v3` | `ARK_API_KEY` | The model ID must match Ark |
-| Baidu Qianfan / GLM and DeepSeek | Hosted Responses | `https://qianfan.baidubce.com/v2` | `QIANFAN_API_KEY` | Qianfan exposes selected hosted GLM, DeepSeek, and Qwen models through Responses |
+| Zhipu GLM | Local Chat bridge | `https://open.bigmodel.cn/api/paas/v4` | `ZHIPUAI_API_KEY` | X-Ray translates Codex Responses traffic to the documented `/chat/completions` endpoint |
+| DeepSeek | Local Chat bridge | `https://api.deepseek.com` | `DEEPSEEK_API_KEY` | X-Ray translates streaming text and function-tool traffic locally |
 | MiniMax | Native Responses | `https://api.minimaxi.com/v1` | `MINIMAX_API_KEY` | MiniMax publishes a Codex desktop setup guide |
 | StepFun | Native Responses | `https://api.stepfun.com/v1` | `STEP_API_KEY` | The current Responses guide documents `step-3.7-flash` |
 
-Known direct vendor hosts that only expose Chat Completions are rejected as Codex Responses Providers. A verified hosted route or a real Responses translation gateway can still be used.
+The installed Codex currently accepts `wire_api = "responses"` for custom Providers. For a Chat preset, X-Ray therefore writes a loopback Responses endpoint into Codex configuration and keeps the real vendor URL in X-Ray's non-secret bridge registry. Codex also requests a model catalog from that endpoint; X-Ray returns the configured model ID and context-window metadata so Codex can schedule compaction correctly.
+
+The bridge translates message text, streaming output, function definitions, tool requests, tool results, and usage counters. It intentionally drops Responses-only built-in tools and metadata that Chat Completions cannot represent, including native Web Search, encrypted reasoning, and server-side compaction. The main window can be closed because X-Ray remains in the system tray; quitting X-Ray stops the bridge.
 
 ### Making an environment variable visible to Codex desktop
 
@@ -54,11 +57,11 @@ Do not put the real key in project files or screenshots. Use `launchctl unsetenv
 ### Write and recovery boundary
 
 1. The page initially calls `config/read` only and never reads `auth.json`. Credential fields in the configuration result are not extracted, returned to the frontend, or stored.
-2. The API key field accepts an environment-variable name only. Saving configuration does not request, read, or persist the key. Only an explicit **Test connection** action reads that environment variable transiently in the backend and sends one minimal Responses request. The key is not returned to the frontend, logged, or placed in process arguments.
+2. Direct API-key entry stores the secret in the operating-system credential store; `config.toml` receives only a command-backed credential helper. Environment-variable authentication remains available. **Test connection** reads the selected credential transiently in the Rust backend and sends one minimal request using the selected protocol. The key is not returned to the frontend, logged, written to SQLite, or placed in process arguments.
 3. Preview shows the current and target Provider, model, and endpoint without writing.
 4. Confirm calls `config/batchWrite` with the user-layer version returned by `config/read` to prevent silent concurrent overwrites.
 5. The previous Provider, model, and non-sensitive endpoint definition are stored in the Codex X-Ray app-data directory as a reversible restore point.
-6. Provider changes do not start model turns or consume Codex allowance. A third-party connection test sends one minimal request and may incur a very small API charge. New tasks or a Codex restart use the new configuration.
+6. Chat bridge mappings store only provider ID, upstream URL, authentication mode, environment-variable name, model ID, and context-window size. They contain no key. Provider changes do not start model turns or consume Codex allowance. A third-party connection test sends one minimal request and may incur a very small API charge. New tasks or a Codex restart use the new configuration.
 
 ## Visual Codex control center
 

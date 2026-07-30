@@ -35,6 +35,7 @@ pub struct EnvironmentProvider {
     pub wire_api: String,
     pub endpoint: Option<String>,
     pub credential_variable: Option<String>,
+    pub credential_source: String,
     pub credential_available: bool,
     pub compatibility: String,
 }
@@ -205,8 +206,11 @@ pub fn build_environment_snapshot(
             .unwrap_or_else(|| "unknown".to_string()),
         endpoint: active_provider.and_then(|provider| provider.base_url.clone()),
         credential_variable: active_provider.and_then(|provider| provider.env_key.clone()),
+        credential_source: active_provider
+            .map(|provider| provider.credential_source.clone())
+            .unwrap_or_else(|| "unknown".to_string()),
         credential_available: active_provider
-            .map(|provider| provider.env_available)
+            .map(|provider| provider.credential_available)
             .unwrap_or(false),
         compatibility: active_provider
             .map(|provider| provider.compatibility.clone())
@@ -224,11 +228,8 @@ pub fn build_environment_snapshot(
         warnings
             .push("The active provider is not confirmed as Responses API compatible.".to_string());
     }
-    if provider.credential_variable.is_some() && !provider.credential_available {
-        warnings.push(
-            "The active provider credential variable is not visible to this app process."
-                .to_string(),
-        );
+    if !provider.credential_available {
+        warnings.push("The active provider credential is not available.".to_string());
     }
     if settings_snapshot.settings.history_persistence == "none" {
         warnings.push(

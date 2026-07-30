@@ -84,7 +84,7 @@ jobs:
               [ -z "${asset_id}" ] || gh api --method DELETE "repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}"
             done < <(
               jq -r '.assets[]
-                | select(.name | endswith(".AppImage") or endswith(".app.tar.gz"))
+                | select(.name | endswith(".AppImage"))
                 | .id' "${release_json}"
             )
           fi
@@ -106,13 +106,19 @@ jobs:
               '.assets | any(.[]; .name | endswith($suffix))' \
               "${release_json}" >/dev/null
           }
+          mac_target_complete() {
+            has_asset "$1.dmg"
+          }
+          windows_target_complete() {
+            has_asset "$1-setup.exe"
+          }
 
-          has_asset "_aarch64.dmg" || add_target macos-latest "--target aarch64-apple-darwin --bundles dmg"
-          has_asset "_x64.dmg" || add_target macos-latest "--target x86_64-apple-darwin --bundles dmg"
+          mac_target_complete "_aarch64" || add_target macos-latest "--target aarch64-apple-darwin --bundles dmg"
+          mac_target_complete "_x64" || add_target macos-latest "--target x86_64-apple-darwin --bundles dmg"
           if ! has_asset "_amd64.deb" || ! has_asset ".x86_64.rpm"; then
             add_target ubuntu-22.04 "--bundles deb,rpm"
           fi
-          has_asset "_x64-setup.exe" || add_target windows-latest "--bundles nsis"
+          windows_target_complete "_x64" || add_target windows-latest "--bundles nsis"
 
           if [ "$(jq 'length' <<< "${include}")" -eq 0 ]; then
             echo "::notice::Draft ${tag} already contains every installer; no platform rebuild is needed."
@@ -233,7 +239,7 @@ jobs:
             - Ubuntu / Debian 64-bit: `_amd64.deb`
             - Fedora / RHEL 64-bit: `.x86_64.rpm`
 
-            These builds are not yet signed with a trusted publisher certificate or notarized. See `CHANGELOG.md` for changes.
+            The app checks GitHub Releases for newer versions and sends users here to download manually. Installers are not yet signed with a trusted publisher certificate or notarized. See `CHANGELOG.md` for changes.
           releaseDraft: true
           prerelease: ${{ needs.prepare.outputs.prerelease }}
           retryAttempts: 0

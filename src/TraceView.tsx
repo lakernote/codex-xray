@@ -1664,10 +1664,16 @@ export default function TraceView({
 
       <div className="trace-lite-catalog-summary">
         <span>
-          <b>{projectCount}</b> {copy(locale, "个项目", "projects")}
+          <b>{projectCount}</b>{" "}
+          {copy(locale, "个项目", projectCount === 1 ? "project" : "projects")}
         </span>
         <span>
-          <b>{allSessions.length}</b> {copy(locale, "个对话", "conversations")}
+          <b>{allSessions.length}</b>{" "}
+          {copy(
+            locale,
+            "个对话",
+            allSessions.length === 1 ? "conversation" : "conversations",
+          )}
         </span>
         <span>
           <b>{analyzedCount}</b> {copy(locale, "个已分析", "analyzed")}
@@ -1906,7 +1912,13 @@ export default function TraceView({
                           <strong>{project.name}</strong>
                           <small>
                             {project.sessions.length}{" "}
-                            {copy(locale, "个对话", "conversations")}
+                            {copy(
+                              locale,
+                              "个对话",
+                              project.sessions.length === 1
+                                ? "conversation"
+                                : "conversations",
+                            )}
                             {project.activeCount > 0 &&
                               copy(
                                 locale,
@@ -2238,15 +2250,6 @@ export default function TraceView({
       </section>
 
       {error && <p className="cost-error">{error}</p>}
-      <footer>
-        <span>
-          {copy(
-            locale,
-            `目录 ${snapshot.official_threads_matched} · 已分析 ${analyzedCount} · ${snapshot.elapsed_ms} ms`,
-            `Catalog ${snapshot.official_threads_matched} · Inspected ${analyzedCount} · ${snapshot.elapsed_ms} ms`,
-          )}
-        </span>
-      </footer>
     </main>
   );
 }

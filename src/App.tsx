@@ -1,6 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
 import {
-  Activity,
   ArrowDown,
   ArrowUp,
   ChartNoAxesCombined,
@@ -9,7 +8,6 @@ import {
   CircleHelp,
   LoaderCircle,
   Moon,
-  ListChecks,
   RefreshCw,
   ScanSearch,
   SlidersHorizontal,
@@ -43,12 +41,11 @@ import {
   type Locale,
   type Translator,
 } from "./i18n";
-import ProviderView, { type ControlSection } from "./ProviderView";
+import ProviderView from "./ProviderView";
 import PricingSettings from "./PricingSettings";
 import ProjectUsageView from "./ProjectUsageView";
 import TraceView from "./TraceView";
-import TaskMonitorView from "./TaskMonitorView";
-import EnvironmentView from "./EnvironmentView";
+import UpdateControl from "./UpdateControl";
 import type {
   CostEstimateSnapshot,
   DailyUsage,
@@ -68,7 +65,7 @@ type UsageReport = "overview" | "daily" | "monthly" | "projects" | "models";
 type HistoryDisplay = "table" | "trend";
 type HistoryOrder = "desc" | "asc";
 type UsageRefreshMode = "initial" | "background" | "manual";
-type ActiveView = "usage" | "tasks" | "trace" | "provider" | "environment";
+type ActiveView = "usage" | "trace" | "provider";
 
 const USAGE_BOOT_CACHE_KEY = "codex-xray.usage-snapshot.v1";
 const COST_BOOT_CACHE_KEY = "codex-xray.cost-snapshot.v2";
@@ -305,9 +302,13 @@ function Metric({
         <span>{label}</span>
         <InfoTip text={help} />
       </div>
-      <strong>{value}</strong>
-      {note && <small>{note}</small>}
-      {secondary && <small className="metric-secondary">{secondary}</small>}
+      <strong title={value}>{value}</strong>
+      {note && <small title={note}>{note}</small>}
+      {secondary && (
+        <small className="metric-secondary" title={secondary}>
+          {secondary}
+        </small>
+      )}
     </div>
   );
 }
@@ -1478,8 +1479,6 @@ function App() {
   const [locale, setLocale] = useState<Locale>(readLocale);
   const [theme, setTheme] = useState<Theme>(readTheme);
   const [activeView, setActiveView] = useState<ActiveView>("usage");
-  const [consoleInitialSection, setConsoleInitialSection] =
-    useState<ControlSection>("provider");
   const [consoleMounted, setConsoleMounted] = useState(false);
   const [usageReport, setUsageReport] = useState<UsageReport>("overview");
   const usageWorkspaceRef = useRef<HTMLElement | null>(null);
@@ -1748,7 +1747,7 @@ function App() {
   }, [applyCostEstimate, loadCostEstimate]);
 
   useEffect(() => {
-    if (!["tasks", "trace"].includes(activeView) || traceLoaded) return;
+    if (activeView !== "trace" || traceLoaded) return;
     let cancelled = false;
     const bootstrapTrace = async () => {
       let restoredCache = traceSnapshot !== null;
@@ -1776,12 +1775,6 @@ function App() {
     loadTrace,
     traceLoaded,
   ]);
-
-  useEffect(() => {
-    if (activeView !== "tasks" || !traceLoaded) return;
-    const timer = window.setInterval(() => void loadTrace(), 10_000);
-    return () => window.clearInterval(timer);
-  }, [activeView, loadTrace, traceLoaded]);
 
   useEffect(() => {
     if (!traceSnapshot) return;
@@ -1959,7 +1952,7 @@ function App() {
           <BrandMark />
           <span className="brand-copy">
             <strong>Codex X-Ray</strong>
-            <small>{t("brand.tagline")}</small>
+            <small title={t("brand.tagline")}>{t("brand.tagline")}</small>
           </span>
         </div>
 
@@ -1971,14 +1964,6 @@ function App() {
           >
             <ChartNoAxesCombined className="nav-icon" aria-hidden="true" />
             {t("nav.usage")}
-          </button>
-          <button
-            className={`nav-item${activeView === "tasks" ? " active" : ""}`}
-            aria-current={activeView === "tasks" ? "page" : undefined}
-            onClick={() => setActiveView("tasks")}
-          >
-            <ListChecks className="nav-icon" aria-hidden="true" />
-            {t("nav.tasks")}
           </button>
           <button
             className={`nav-item${activeView === "trace" ? " active" : ""}`}
@@ -1998,14 +1983,6 @@ function App() {
           >
             <SlidersHorizontal className="nav-icon" aria-hidden="true" />
             {t("nav.provider")}
-          </button>
-          <button
-            className={`nav-item${activeView === "environment" ? " active" : ""}`}
-            aria-current={activeView === "environment" ? "page" : undefined}
-            onClick={() => setActiveView("environment")}
-          >
-            <Activity className="nav-icon" aria-hidden="true" />
-            {t("nav.environment")}
           </button>
         </nav>
 
@@ -2052,6 +2029,7 @@ function App() {
               {locale === "zh-CN" ? "暗色" : "Dark"}
             </button>
           </div>
+          <UpdateControl locale={locale} onOpenUrl={openExternal} />
         </div>
 
       </aside>
@@ -2060,7 +2038,6 @@ function App() {
         <ProviderView
           locale={locale}
           onOpenUrl={openExternal}
-          initialSection={consoleInitialSection}
           hidden={activeView !== "provider"}
         />
       )}
@@ -2073,28 +2050,6 @@ function App() {
           usingCache={traceUsingCache}
           error={traceError}
           onRefresh={() => void loadTrace()}
-        />
-      )}
-      {activeView === "tasks" && (
-        <TaskMonitorView
-          locale={locale}
-          snapshot={traceSnapshot}
-          loading={traceLoading}
-          usingCache={traceUsingCache}
-          error={traceError}
-          onRefresh={() => void loadTrace()}
-          onOpenSession={(sessionId) => openUsageTrace(sessionId)}
-        />
-      )}
-      {activeView === "environment" && (
-        <EnvironmentView
-          locale={locale}
-          onOpenTrace={() => setActiveView("trace")}
-          onOpenConsole={(section) => {
-            setConsoleInitialSection(section);
-            setConsoleMounted(true);
-            setActiveView("provider");
-          }}
         />
       )}
       {activeView === "usage" && (

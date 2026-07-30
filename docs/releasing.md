@@ -1,6 +1,6 @@
-# Release and update pipeline
+# Release pipeline
 
-The repository can build draft installers on GitHub today. In-app automatic update must remain disabled until signing, notarization, and update verification are configured.
+The repository builds draft installers on GitHub. Codex X-Ray checks public GitHub Releases for newer versions and sends users to the download page; it does not download or install updates.
 
 ## 1. Repository settings
 
@@ -42,20 +42,10 @@ Configure a protected GitHub `release` environment before the first public relea
 
 Unsigned development artifacts are suitable for internal verification only. Public macOS and Windows distribution should add platform signing and macOS notarization first.
 
-## 4. Enable signed in-app updates
+## 4. Version reminders
 
-This stage requires a stable public repository and must not use placeholder values.
+The app requests the repository's public GitHub Releases API at most once per day. Stable builds only consider stable releases; prerelease builds also consider prereleases. A user may ignore one version or open the Release page and download an installer manually. No updater signing key or update manifest is required.
 
-1. Generate a Tauri updater signing keypair and store the private key only as GitHub Actions secrets.
-2. Add the public key and the repository's real `latest.json` endpoint to Tauri updater configuration.
-3. Enable updater artifact generation in `tauri.conf.json`.
-4. Add the Tauri updater plugin and a user-controlled “Check for updates” action.
-5. Pass the signing key and password to the release workflow as secrets.
-6. Test upgrade from the previous released version on every supported platform.
-
-The updater verifies signed artifacts. Never ship an updater that trusts unsigned files or a mutable placeholder endpoint.
-
-Official references:
+GitHub Actions reference:
 
 - <https://v2.tauri.app/distribute/pipelines/github/>
-- <https://v2.tauri.app/plugin/updater/>

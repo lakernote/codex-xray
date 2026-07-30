@@ -1,14 +1,20 @@
 use std::env;
 use std::fs;
-use std::io::Write;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Instant;
 
 use chrono::Utc;
+use keyring::{Entry, Error as KeyringError};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use url::Url;
+
+use crate::chat_bridge::{ChatBridgeState, is_provider_bridge_url, provider_base_url};
+
+const CREDENTIAL_SERVICE: &str = "app.codex-xray.provider";
+const CREDENTIAL_HELPER_ARG: &str = "--codex-xray-credential";
 
 const BUILTIN_PROVIDERS: &[(&str, &str, Option<&str>)] = &[
     ("openai", "OpenAI", None),
@@ -24,7 +30,14 @@ pub struct ProviderDefinition {
     pub base_url: Option<String>,
     pub env_key: Option<String>,
     pub env_available: bool,
+    pub credential_source: String,
+    pub credential_available: bool,
+    pub auth_command: Option<String>,
+    pub auth_args: Vec<String>,
     pub wire_api: String,
+    #[serde(default = "default_protocol")]
+    pub protocol: String,
+    pub context_window: Option<u64>,
     pub builtin: bool,
     pub compatibility: String,
 }
@@ -59,7 +72,17 @@ pub struct ProviderApplyRequest {
     pub name: Option<String>,
     pub base_url: Option<String>,
     pub env_key: Option<String>,
+    pub credential_mode: Option<String>,
+    pub api_key: Option<String>,
+    #[serde(default = "default_protocol")]
+    pub protocol: String,
+    #[serde(default = "default_context_window")]
+    pub context_window: u64,
     pub expected_version: Option<String>,
+}
+
+fn default_context_window() -> u64 {
+    128_000
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -103,6 +126,92 @@ fn is_builtin(id: &str) -> bool {
         .any(|(builtin_id, _, _)| *builtin_id == id)
 }
 
+fn credential_entry(provider_id: &str) -> Result<Entry, String> {
+    Entry::new(CREDENTIAL_SERVICE, provider_id)
+        .map_err(|error| format!("无法访问系统凭据存储：{error}"))
+}
+
+fn keyring_error_message(error: KeyringError) -> String {
+    match error {
+        KeyringError::NoEntry => "系统凭据存储中没有这个 Provider 的 API Key。".to_string(),
+        other => format!("无法读取系统凭据存储：{other}"),
+    }
+}
+
+pub(crate) fn read_credential(provider_id: &str) -> Result<String, String> {
+    credential_entry(provider_id)?
+        .get_password()
+        .map_err(keyring_error_message)
+        .and_then(validate_api_key)
+}
+
+fn default_protocol() -> String {
+    "responses".to_string()
+}
+
+fn credential_exists(provider_id: &str) -> bool {
+    read_credential(provider_id).is_ok()
+}
+
+fn save_credential(provider_id: &str, api_key: &str) -> Result<(), String> {
+    let api_key = validate_api_key(api_key.to_string())?;
+    credential_entry(provider_id)?
+        .set_password(&api_key)
+        .map_err(|error| format!("无法将 API Key 保存到系统凭据存储：{error}"))
+}
+
+pub fn delete_credential(provider_id: &str) -> Result<(), String> {
+    let provider_id = validate_identifier(provider_id, "Provider ID")?;
+    match credential_entry(&provider_id)?.delete_credential() {
+        Ok(()) | Err(KeyringError::NoEntry) => Ok(()),
+        Err(error) => Err(format!("无法从系统凭据存储删除 API Key：{error}")),
+    }
+}
+
+fn validate_api_key(value: String) -> Result<String, String> {
+    let value = value.trim().to_string();
+    if value.is_empty() {
+        return Err("API Key 不能为空。".to_string());
+    }
+    if value.len() > 32 * 1024 || value.contains(['\r', '\n', '\0']) {
+        return Err("API Key 过长或包含无效控制字符。".to_string());
+    }
+    Ok(value)
+}
+
+fn credential_helper_definition(provider_id: &str) -> Result<(String, Vec<String>), String> {
+    let executable =
+        env::current_exe().map_err(|error| format!("无法定位 Codex X-Ray 可执行文件：{error}"))?;
+    Ok((
+        executable.to_string_lossy().into_owned(),
+        vec![CREDENTIAL_HELPER_ARG.to_string(), provider_id.to_string()],
+    ))
+}
+
+fn auth_definition(value: &Value) -> (Option<String>, Vec<String>) {
+    let command = value
+        .get("auth")
+        .and_then(|auth| string_field(auth, "command"));
+    let args = value
+        .pointer("/auth/args")
+        .and_then(Value::as_array)
+        .map(|args| {
+            args.iter()
+                .filter_map(Value::as_str)
+                .map(ToOwned::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    (command, args)
+}
+
+fn is_xray_credential_helper(args: &[String], provider_id: &str) -> bool {
+    matches!(
+        args,
+        [helper, id] if helper == CREDENTIAL_HELPER_ARG && id == provider_id
+    )
+}
+
 fn compatibility_for(base_url: Option<&str>, wire_api: &str) -> String {
     if base_url.is_some_and(is_known_chat_only_url) {
         return "chat_only".to_string();
@@ -120,6 +229,27 @@ fn definition_from_value(id: &str, value: &Value) -> ProviderDefinition {
     let env_available = env_key
         .as_deref()
         .is_some_and(|key| env::var_os(key).is_some());
+    let (auth_command, auth_args) = auth_definition(value);
+    let keychain = auth_command.is_some() && is_xray_credential_helper(&auth_args, id);
+    let credential_source = if keychain {
+        "keychain"
+    } else if auth_command.is_some() {
+        "command"
+    } else if env_key.is_some() {
+        "environment"
+    } else {
+        "none"
+    }
+    .to_string();
+    let credential_available = if keychain {
+        credential_exists(id)
+    } else if auth_command.is_some() {
+        true
+    } else if env_key.is_some() {
+        env_available
+    } else {
+        true
+    };
     let wire_api = string_field(value, "wire_api").unwrap_or_else(|| "responses".to_string());
     ProviderDefinition {
         id: id.to_string(),
@@ -128,7 +258,13 @@ fn definition_from_value(id: &str, value: &Value) -> ProviderDefinition {
         base_url,
         env_key,
         env_available,
+        credential_source,
+        credential_available,
+        auth_command,
+        auth_args,
         wire_api,
+        protocol: "responses".to_string(),
+        context_window: None,
         builtin: is_builtin(id),
     }
 }
@@ -177,7 +313,13 @@ pub fn build_provider_snapshot(
                 base_url: base_url.map(ToOwned::to_owned),
                 env_key: None,
                 env_available: true,
+                credential_source: "builtin".to_string(),
+                credential_available: true,
+                auth_command: None,
+                auth_args: Vec::new(),
                 wire_api: "responses".to_string(),
+                protocol: "responses".to_string(),
+                context_window: None,
                 builtin: true,
                 compatibility: "responses".to_string(),
             });
@@ -223,10 +365,14 @@ pub fn build_provider_snapshot(
         } else if active.compatibility != "responses" {
             warnings.push("当前 Provider 不是 Codex 支持的 Responses API。".to_string());
         }
-        if active.env_key.is_some() && !active.env_available {
+        if !active.credential_available {
             warnings.push(format!(
-                "当前进程没有检测到环境变量 {}。",
-                active.env_key.as_deref().unwrap_or_default()
+                "当前 Provider 的{}凭据不可用。",
+                if active.credential_source == "keychain" {
+                    "系统钥匙串"
+                } else {
+                    "环境变量"
+                }
             ));
         }
     } else {
@@ -246,6 +392,39 @@ pub fn build_provider_snapshot(
         restore_available: restore_path.is_file(),
         warnings,
     })
+}
+
+pub fn enrich_provider_snapshot_with_bridge(
+    snapshot: &mut ProviderSnapshot,
+    bridge: &ChatBridgeState,
+) {
+    for provider in &mut snapshot.providers {
+        let Some(mapping) = bridge.provider(&provider.id) else {
+            continue;
+        };
+        if provider
+            .base_url
+            .as_deref()
+            .is_some_and(|base_url| is_provider_bridge_url(&provider.id, base_url))
+        {
+            provider.base_url = Some(mapping.upstream_base_url);
+            provider.protocol = "chat_completions".to_string();
+            provider.context_window = Some(mapping.context_window);
+            provider.compatibility = "chat_bridge".to_string();
+        }
+    }
+    if let Some(active) = snapshot
+        .providers
+        .iter()
+        .find(|provider| provider.id == snapshot.active_provider)
+        && active.protocol == "chat_completions"
+        && !bridge.status().running
+    {
+        snapshot.warnings.push(
+            "当前 Provider 使用 Chat 兼容桥，但本地桥没有运行；请保持 Codex X-Ray 打开。"
+                .to_string(),
+        );
+    }
 }
 
 fn validate_identifier(value: &str, label: &str) -> Result<String, String> {
@@ -271,7 +450,14 @@ fn validate_model(value: &str) -> Result<String, String> {
     Ok(value.to_string())
 }
 
-fn validate_base_url(value: &str) -> Result<String, String> {
+fn validate_context_window(value: u64) -> Result<u64, String> {
+    if !(8_192..=4_000_000).contains(&value) {
+        return Err("上下文窗口必须在 8,192 到 4,000,000 Token 之间。".to_string());
+    }
+    Ok(value)
+}
+
+fn validate_provider_url(value: &str, allow_chat_only: bool) -> Result<String, String> {
     let value = value.trim().trim_end_matches('/');
     let parsed = Url::parse(value).map_err(|_| "Provider URL 不是有效 URL。".to_string())?;
     let local_http = parsed.scheme() == "http"
@@ -287,13 +473,17 @@ fn validate_base_url(value: &str) -> Result<String, String> {
     if parsed.query().is_some() || parsed.fragment().is_some() {
         return Err("Provider URL 不能包含查询参数或片段。".to_string());
     }
-    if is_known_chat_only_url(value) {
+    if !allow_chat_only && is_known_chat_only_url(value) {
         return Err(
             "这个厂商直连地址目前只公布了 Chat Completions，不能直接用于只接受 Responses API 的 Codex。请选择支持 Responses 的云平台入口，或填写 Responses 适配网关。"
                 .to_string(),
         );
     }
     Ok(value.to_string())
+}
+
+fn validate_base_url(value: &str) -> Result<String, String> {
+    validate_provider_url(value, false)
 }
 
 fn is_known_chat_only_url(value: &str) -> bool {
@@ -310,6 +500,28 @@ fn is_known_chat_only_url(value: &str) -> bool {
     })
 }
 
+fn credential_mode(request: &ProviderApplyRequest) -> Result<&str, String> {
+    let mode = request.credential_mode.as_deref().unwrap_or_else(|| {
+        if request.env_key.is_some() {
+            "environment"
+        } else {
+            "none"
+        }
+    });
+    if !["keychain", "environment", "none"].contains(&mode) {
+        return Err("凭据方式不是 Codex X-Ray 支持的值。".to_string());
+    }
+    Ok(mode)
+}
+
+fn provider_protocol(request: &ProviderApplyRequest) -> Result<&str, String> {
+    let protocol = request.protocol.trim();
+    if !["responses", "chat_completions"].contains(&protocol) {
+        return Err("接口协议必须是 Responses 或 Chat Completions。".to_string());
+    }
+    Ok(protocol)
+}
+
 fn custom_definition(request: &ProviderApplyRequest) -> Result<ProviderDefinition, String> {
     let id = validate_identifier(&request.provider_id, "Provider ID")?;
     let name = request
@@ -322,16 +534,53 @@ fn custom_definition(request: &ProviderApplyRequest) -> Result<ProviderDefinitio
     if name.len() > 96 || name.contains(['\r', '\n', '\0']) {
         return Err("Provider 名称过长或包含控制字符。".to_string());
     }
-    let base_url = request
+    let protocol = provider_protocol(request)?;
+    let context_window = if protocol == "chat_completions" {
+        Some(validate_context_window(request.context_window)?)
+    } else {
+        None
+    };
+    let upstream_base_url = request
         .base_url
         .as_deref()
-        .ok_or_else(|| "自定义 Provider 必须填写 Responses API Base URL。".to_string())
-        .and_then(validate_base_url)?;
-    let env_key = request
-        .env_key
-        .as_deref()
-        .map(|value| validate_identifier(value, "环境变量名"))
-        .transpose()?;
+        .ok_or_else(|| "自定义 Provider 必须填写 API Base URL。".to_string())
+        .and_then(|value| validate_provider_url(value, protocol == "chat_completions"))?;
+    let base_url = if protocol == "chat_completions" {
+        provider_base_url(&id)
+    } else {
+        upstream_base_url
+    };
+    let mode = credential_mode(request)?;
+    let env_key = if mode == "environment" {
+        Some(
+            request
+                .env_key
+                .as_deref()
+                .ok_or_else(|| "使用环境变量时必须填写变量名。".to_string())
+                .and_then(|value| validate_identifier(value, "环境变量名"))?,
+        )
+    } else {
+        None
+    };
+    let (auth_command, auth_args) = if mode == "keychain" {
+        let (command, args) = credential_helper_definition(&id)?;
+        (Some(command), args)
+    } else {
+        (None, Vec::new())
+    };
+    let credential_available = match mode {
+        "keychain" => {
+            request
+                .api_key
+                .as_deref()
+                .is_some_and(|value| validate_api_key(value.to_string()).is_ok())
+                || credential_exists(&id)
+        }
+        "environment" => env_key
+            .as_deref()
+            .is_some_and(|key| env::var_os(key).is_some()),
+        _ => true,
+    };
     Ok(ProviderDefinition {
         id,
         name,
@@ -340,33 +589,52 @@ fn custom_definition(request: &ProviderApplyRequest) -> Result<ProviderDefinitio
             .as_deref()
             .is_some_and(|key| env::var_os(key).is_some()),
         env_key,
+        credential_source: mode.to_string(),
+        credential_available,
+        auth_command,
+        auth_args,
         wire_api: "responses".to_string(),
+        protocol: protocol.to_string(),
+        context_window,
         builtin: false,
-        compatibility: "responses".to_string(),
+        compatibility: if protocol == "chat_completions" {
+            "chat_bridge".to_string()
+        } else {
+            "responses".to_string()
+        },
     })
 }
 
-fn edit(key_path: impl Into<String>, value: Value) -> Value {
+fn edit(key_path: impl Into<String>, value: Value, merge_strategy: &str) -> Value {
     json!({
         "keyPath": key_path.into(),
         "value": value,
-        "mergeStrategy": "upsert"
+        "mergeStrategy": merge_strategy
     })
 }
 
 fn definition_edits(definition: &ProviderDefinition) -> Vec<Value> {
     let prefix = format!("model_providers.{}", definition.id);
-    let mut edits = vec![
-        edit(format!("{prefix}.name"), json!(definition.name)),
-        edit(format!("{prefix}.wire_api"), json!("responses")),
-    ];
+    let mut value = Map::from_iter([
+        ("name".to_string(), json!(definition.name)),
+        ("wire_api".to_string(), json!("responses")),
+    ]);
     if let Some(base_url) = &definition.base_url {
-        edits.push(edit(format!("{prefix}.base_url"), json!(base_url)));
+        value.insert("base_url".to_string(), json!(base_url));
     }
     if let Some(env_key) = &definition.env_key {
-        edits.push(edit(format!("{prefix}.env_key"), json!(env_key)));
+        value.insert("env_key".to_string(), json!(env_key));
     }
-    edits
+    if let Some(command) = &definition.auth_command {
+        value.insert(
+            "auth".to_string(),
+            json!({
+                "command": command,
+                "args": definition.auth_args,
+            }),
+        );
+    }
+    vec![edit(prefix, Value::Object(value), "replace")]
 }
 
 pub fn build_apply_edits(
@@ -374,14 +642,17 @@ pub fn build_apply_edits(
 ) -> Result<(Vec<Value>, Option<ProviderDefinition>), String> {
     let provider_id = validate_identifier(&request.provider_id, "Provider ID")?;
     let model = validate_model(&request.model)?;
+    if is_builtin(&provider_id) && provider_protocol(request)? != "responses" {
+        return Err("Codex 内置 Provider 不能改为 Chat Completions。".to_string());
+    }
     let definition = if is_builtin(&provider_id) {
         None
     } else {
         Some(custom_definition(request)?)
     };
     let mut edits = vec![
-        edit("model_provider", json!(provider_id)),
-        edit("model", json!(model)),
+        edit("model_provider", json!(provider_id), "replace"),
+        edit("model", json!(model), "replace"),
     ];
     if let Some(definition) = &definition {
         edits.extend(definition_edits(definition));
@@ -392,6 +663,7 @@ pub fn build_apply_edits(
 pub fn probe_provider(request: &ProviderApplyRequest) -> Result<ProviderTestResult, String> {
     let provider_id = validate_identifier(&request.provider_id, "Provider ID")?;
     let model = validate_model(&request.model)?;
+    let protocol = provider_protocol(request)?;
     let definition = if is_builtin(&provider_id) {
         let (_, name, default_base_url) = BUILTIN_PROVIDERS
             .iter()
@@ -418,7 +690,13 @@ pub fn probe_provider(request: &ProviderApplyRequest) -> Result<ProviderTestResu
                 .map(|value| validate_identifier(value, "环境变量名"))
                 .transpose()?,
             env_available: true,
+            credential_source: credential_mode(request)?.to_string(),
+            credential_available: true,
+            auth_command: None,
+            auth_args: Vec::new(),
             wire_api: "responses".to_string(),
+            protocol: "responses".to_string(),
+            context_window: None,
             builtin: true,
             compatibility: "responses".to_string(),
         }
@@ -426,34 +704,71 @@ pub fn probe_provider(request: &ProviderApplyRequest) -> Result<ProviderTestResu
         custom_definition(request)?
     };
 
-    let base_url = definition
-        .base_url
-        .as_deref()
-        .ok_or_else(|| "没有可探测的 Responses API 地址。".to_string())?;
-    let endpoint = format!("{}/responses", base_url.trim_end_matches('/'));
-    let credential = definition
-        .env_key
-        .as_deref()
-        .map(|key| {
-            env::var(key)
-                .map_err(|_| format!("当前应用进程没有检测到环境变量 {key}。"))
-                .and_then(|value| {
-                    if value.is_empty() || value.contains(['\r', '\n', '\0']) {
-                        Err(format!("环境变量 {key} 为空或包含无效字符。"))
-                    } else {
-                        Ok(value)
-                    }
-                })
+    let base_url = if protocol == "chat_completions" {
+        request
+            .base_url
+            .as_deref()
+            .ok_or_else(|| "没有可探测的 Chat Completions 地址。".to_string())
+            .and_then(|value| validate_provider_url(value, true))?
+    } else {
+        definition
+            .base_url
+            .clone()
+            .ok_or_else(|| "没有可探测的 Responses API 地址。".to_string())?
+    };
+    let endpoint = if protocol == "chat_completions" {
+        let base_url = base_url.trim_end_matches('/');
+        if base_url.ends_with("/chat/completions") {
+            base_url.to_string()
+        } else {
+            format!("{base_url}/chat/completions")
+        }
+    } else {
+        format!("{}/responses", base_url.trim_end_matches('/'))
+    };
+    let credential = if let Some(api_key) = request
+        .api_key
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        Some(validate_api_key(api_key.clone())?)
+    } else if definition.credential_source == "keychain" {
+        Some(read_credential(&provider_id)?)
+    } else {
+        definition
+            .env_key
+            .as_deref()
+            .map(|key| {
+                env::var(key)
+                    .map_err(|_| format!("当前应用进程没有检测到环境变量 {key}。"))
+                    .and_then(|value| {
+                        if value.is_empty() || value.contains(['\r', '\n', '\0']) {
+                            Err(format!("环境变量 {key} 为空或包含无效字符。"))
+                        } else {
+                            Ok(value)
+                        }
+                    })
+            })
+            .transpose()?
+    };
+    let request_body = if protocol == "chat_completions" {
+        json!({
+            "model": model,
+            "messages": [{"role": "user", "content": "Return only OK."}],
+            "max_tokens": 16,
+            "stream": false
         })
-        .transpose()?;
-    let body = serde_json::to_string(&json!({
-        "model": model,
-        "input": "Return only OK.",
-        "max_output_tokens": 16,
-        "store": false,
-        "stream": false
-    }))
-    .map_err(|error| format!("无法生成探测请求：{error}"))?;
+    } else {
+        json!({
+            "model": model,
+            "input": "Return only OK.",
+            "max_output_tokens": 16,
+            "store": false,
+            "stream": false
+        })
+    };
+    let body = serde_json::to_string(&request_body)
+        .map_err(|error| format!("无法生成探测请求：{error}"))?;
     let marker = "\n__CODEX_XRAY_HTTP_STATUS__:";
     let started = Instant::now();
     let mut command = Command::new("curl");
@@ -498,7 +813,11 @@ pub fn probe_provider(request: &ProviderApplyRequest) -> Result<ProviderTestResu
     if !output.status.success() {
         return Ok(ProviderTestResult {
             success: false,
-            check_kind: "responses_request".to_string(),
+            check_kind: if protocol == "chat_completions" {
+                "chat_completions_request".to_string()
+            } else {
+                "responses_request".to_string()
+            },
             provider_id,
             model: request.model.trim().to_string(),
             endpoint: Some(endpoint),
@@ -520,13 +839,21 @@ pub fn probe_provider(request: &ProviderApplyRequest) -> Result<ProviderTestResu
         .map_err(|_| format!("Provider 返回了无效 HTTP 状态：{status}"))?;
     let success = (200..300).contains(&http_status);
     let message = if success {
-        "真实 /responses 请求成功；模型、地址和凭据已通过本次探测。".to_string()
+        if protocol == "chat_completions" {
+            "真实 /chat/completions 请求成功；保存后 Codex 将通过本地兼容桥使用它。".to_string()
+        } else {
+            "真实 /responses 请求成功；模型、地址和凭据已通过本次探测。".to_string()
+        }
     } else {
         response_error_message(response)
     };
     Ok(ProviderTestResult {
         success,
-        check_kind: "responses_request".to_string(),
+        check_kind: if protocol == "chat_completions" {
+            "chat_completions_request".to_string()
+        } else {
+            "responses_request".to_string()
+        },
         provider_id,
         model: request.model.trim().to_string(),
         endpoint: Some(endpoint),
@@ -578,14 +905,101 @@ pub fn restore_point(snapshot: &ProviderSnapshot) -> ProviderRestorePoint {
 
 pub fn restore_edits(point: &ProviderRestorePoint) -> Result<Vec<Value>, String> {
     let provider_id = validate_identifier(&point.provider_id, "Provider ID")?;
-    let mut edits = vec![edit("model_provider", json!(provider_id))];
+    let mut edits = vec![edit("model_provider", json!(provider_id), "replace")];
     if let Some(model) = &point.model {
-        edits.push(edit("model", json!(validate_model(model)?)));
+        edits.push(edit("model", json!(validate_model(model)?), "replace"));
     }
     if let Some(definition) = &point.definition {
         edits.extend(definition_edits(definition));
     }
     Ok(edits)
+}
+
+pub struct CredentialRollback {
+    provider_id: String,
+    previous: Option<String>,
+    changed: bool,
+}
+
+pub fn persist_request_credential(
+    request: &ProviderApplyRequest,
+) -> Result<CredentialRollback, String> {
+    let provider_id = validate_identifier(&request.provider_id, "Provider ID")?;
+    if is_builtin(&provider_id) || credential_mode(request)? != "keychain" {
+        return Ok(CredentialRollback {
+            provider_id,
+            previous: None,
+            changed: false,
+        });
+    }
+    let previous = read_credential(&provider_id).ok();
+    if let Some(api_key) = request
+        .api_key
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        save_credential(&provider_id, api_key)?;
+        return Ok(CredentialRollback {
+            provider_id,
+            previous,
+            changed: true,
+        });
+    }
+    if previous.is_none() {
+        return Err("请先填写 API Key；保存后它只会进入系统凭据存储。".to_string());
+    }
+    Ok(CredentialRollback {
+        provider_id,
+        previous,
+        changed: false,
+    })
+}
+
+pub fn rollback_credential(update: CredentialRollback) {
+    if !update.changed {
+        return;
+    }
+    if let Some(previous) = update.previous {
+        let _ = save_credential(&update.provider_id, &previous);
+    } else {
+        let _ = delete_credential(&update.provider_id);
+    }
+}
+
+pub fn credential_helper_exit_code() -> Option<i32> {
+    let mut args = env::args_os();
+    let _executable = args.next();
+    let flag = args.next()?;
+    if flag != CREDENTIAL_HELPER_ARG {
+        return None;
+    }
+    let Some(provider_id) = args.next().and_then(|value| value.into_string().ok()) else {
+        eprintln!("Codex X-Ray credential helper: missing Provider ID");
+        return Some(2);
+    };
+    if args.next().is_some() {
+        eprintln!("Codex X-Ray credential helper: unexpected arguments");
+        return Some(2);
+    }
+    match validate_identifier(&provider_id, "Provider ID")
+        .and_then(|provider_id| read_credential(&provider_id))
+    {
+        Ok(secret) => {
+            if io::stdout()
+                .write_all(secret.as_bytes())
+                .and_then(|_| io::stdout().flush())
+                .is_ok()
+            {
+                Some(0)
+            } else {
+                Some(1)
+            }
+        }
+        Err(error) => {
+            eprintln!("Codex X-Ray credential helper: {error}");
+            Some(1)
+        }
+    }
 }
 
 pub fn save_restore_point(path: &Path, point: &ProviderRestorePoint) -> Result<(), String> {
@@ -618,6 +1032,10 @@ mod tests {
             name: Some("GLM".to_string()),
             base_url: Some("https://open.bigmodel.cn/api/coding/paas/v4".to_string()),
             env_key: Some("ZHIPUAI_API_KEY".to_string()),
+            credential_mode: Some("environment".to_string()),
+            api_key: None,
+            protocol: "responses".to_string(),
+            context_window: 128_000,
             expected_version: None,
         };
         let error = build_apply_edits(&request).expect_err("direct GLM should be rejected");
@@ -632,11 +1050,15 @@ mod tests {
             name: Some("Baidu Qianfan · GLM".to_string()),
             base_url: Some("https://qianfan.baidubce.com/v2".to_string()),
             env_key: Some("QIANFAN_API_KEY".to_string()),
+            credential_mode: Some("environment".to_string()),
+            api_key: None,
+            protocol: "responses".to_string(),
+            context_window: 128_000,
             expected_version: None,
         };
         let (edits, definition) =
             build_apply_edits(&request).expect("Qianfan exposes Responses API");
-        assert_eq!(edits.len(), 6);
+        assert_eq!(edits.len(), 3);
         assert_eq!(
             definition.and_then(|item| item.base_url),
             Some("https://qianfan.baidubce.com/v2".to_string())
@@ -666,14 +1088,60 @@ mod tests {
             name: Some("GLM via Responses gateway".to_string()),
             base_url: Some("https://gateway.example.com/v1".to_string()),
             env_key: Some("ZHIPUAI_API_KEY".to_string()),
+            credential_mode: Some("environment".to_string()),
+            api_key: None,
+            protocol: "responses".to_string(),
+            context_window: 128_000,
             expected_version: Some("v1".to_string()),
         };
         let (edits, definition) = build_apply_edits(&request).expect("valid provider");
-        assert_eq!(edits.len(), 6);
+        assert_eq!(edits.len(), 3);
         assert_eq!(
             definition.and_then(|item| item.base_url),
             Some("https://gateway.example.com/v1".to_string())
         );
         assert!(!edits.iter().any(|item| item.to_string().contains("secret")));
+    }
+
+    #[test]
+    fn writes_keychain_auth_without_serializing_api_key() {
+        let request = ProviderApplyRequest {
+            provider_id: "dashscope".to_string(),
+            model: "qwen3-coder-plus".to_string(),
+            name: Some("Alibaba Model Studio".to_string()),
+            base_url: Some("https://dashscope.aliyuncs.com/compatible-mode/v1".to_string()),
+            env_key: None,
+            credential_mode: Some("keychain".to_string()),
+            api_key: Some("test-secret-value".to_string()),
+            protocol: "responses".to_string(),
+            context_window: 128_000,
+            expected_version: None,
+        };
+        let (edits, definition) = build_apply_edits(&request).expect("keychain provider");
+        let serialized = serde_json::to_string(&edits).expect("serialize edits");
+        assert!(!serialized.contains("test-secret-value"));
+        assert!(serialized.contains(CREDENTIAL_HELPER_ARG));
+        assert!(definition.is_some_and(|provider| provider.credential_source == "keychain"));
+    }
+
+    #[test]
+    fn routes_chat_completions_through_local_bridge() {
+        let request = ProviderApplyRequest {
+            provider_id: "deepseek-direct".to_string(),
+            model: "deepseek-chat".to_string(),
+            name: Some("DeepSeek Direct".to_string()),
+            base_url: Some("https://api.deepseek.com".to_string()),
+            env_key: None,
+            credential_mode: Some("keychain".to_string()),
+            api_key: Some("test-secret-value".to_string()),
+            protocol: "chat_completions".to_string(),
+            context_window: 128_000,
+            expected_version: None,
+        };
+        let (edits, definition) = build_apply_edits(&request).expect("chat bridge provider");
+        let serialized = serde_json::to_string(&edits).expect("serialize edits");
+        assert!(serialized.contains("http://127.0.0.1:32198/v1/chat/deepseek-direct"));
+        assert!(!serialized.contains("https://api.deepseek.com"));
+        assert!(definition.is_some_and(|provider| provider.compatibility == "chat_bridge"));
     }
 }

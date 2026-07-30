@@ -240,9 +240,24 @@ export type ProviderDefinition = {
   base_url: string | null;
   env_key: string | null;
   env_available: boolean;
+  credential_source:
+    | "builtin"
+    | "keychain"
+    | "environment"
+    | "command"
+    | "none";
+  credential_available: boolean;
+  auth_command: string | null;
+  auth_args: string[];
   wire_api: string;
+  protocol: "responses" | "chat_completions";
+  context_window: number | null;
   builtin: boolean;
-  compatibility: "responses" | "chat_only" | "unsupported_wire_api";
+  compatibility:
+    | "responses"
+    | "chat_bridge"
+    | "chat_only"
+    | "unsupported_wire_api";
 };
 
 export type ProviderSnapshot = {
@@ -272,18 +287,32 @@ export type ProviderApplyRequest = {
   name: string | null;
   base_url: string | null;
   env_key: string | null;
+  credential_mode: "keychain" | "environment" | "none" | null;
+  api_key: string | null;
+  protocol: "responses" | "chat_completions";
+  context_window: number;
   expected_version: string | null;
 };
 
 export type ProviderTestResult = {
   success: boolean;
-  check_kind: "responses_request" | "codex_model_catalog";
+  check_kind:
+    | "responses_request"
+    | "chat_completions_request"
+    | "codex_model_catalog";
   provider_id: string;
   model: string;
   endpoint: string | null;
   latency_ms: number;
   http_status: number | null;
   message: string;
+};
+
+export type ChatBridgeStatus = {
+  running: boolean;
+  base_url: string;
+  configured_providers: number;
+  last_error: string | null;
 };
 
 export type CodexSettings = {
@@ -349,6 +378,7 @@ export type EnvironmentProvider = {
   wire_api: string;
   endpoint: string | null;
   credential_variable: string | null;
+  credential_source: string;
   credential_available: boolean;
   compatibility: string;
 };

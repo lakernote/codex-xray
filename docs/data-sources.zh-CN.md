@@ -24,7 +24,7 @@ Codex X-Ray 给自己启动的 App Server 指定独立的 `sqlite_home`，因此
 
 环境诊断中的“分析数据库”是 Codex X-Ray 自己的 `codex-xray.sqlite`，不是 Codex App 的 SQLite。X-Ray 启动的 App Server 另用隔离的 `sqlite_home` 保存其运行状态。环境诊断不读取 `auth.json`，也不声称能够附着到另一个 Codex App 进程。
 
-## Provider 配置与国产 Responses
+## Provider 配置与 Chat 兼容
 
 Codex 当前的自定义 Provider 使用 `wire_api = "responses"`。界面里的“OpenAI 兼容”不会自动视为可用：只有厂商明确实现 `/responses`、SSE 事件和函数工具调用时，才标记为原生或托管 Responses。
 
@@ -33,11 +33,14 @@ Codex 当前的自定义 Provider 使用 `wire_api = "responses"`。界面里的
 | OpenAI | Codex 内置 | Codex 内置 | Codex 登录 | 不新增自定义 Provider |
 | 阿里百炼 / Qwen | 厂商原生 Responses | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `DASHSCOPE_API_KEY` | 现有公共域名仍可用，官方建议换成业务空间专属域名 |
 | 火山方舟 / 豆包 | 厂商原生 Responses | `https://ark.cn-beijing.volces.com/api/v3` | `ARK_API_KEY` | 模型 ID 需与方舟控制台/文档一致 |
-| 百度千帆 / GLM、DeepSeek | 云平台托管 Responses | `https://qianfan.baidubce.com/v2` | `QIANFAN_API_KEY` | 千帆把指定 GLM、DeepSeek、Qwen 模型暴露为 Responses |
+| 智谱 GLM | 本机 Chat 桥 | `https://open.bigmodel.cn/api/paas/v4` | `ZHIPUAI_API_KEY` | X-Ray 把 Codex Responses 流转换到厂商文档中的 `/chat/completions` |
+| DeepSeek | 本机 Chat 桥 | `https://api.deepseek.com` | `DEEPSEEK_API_KEY` | X-Ray 在本机转换流式文本和函数工具调用 |
 | MiniMax | 厂商原生 Responses | `https://api.minimaxi.com/v1` | `MINIMAX_API_KEY` | 官方提供 Codex 桌面端接入说明 |
 | StepFun | 厂商原生 Responses | `https://api.stepfun.com/v1` | `STEP_API_KEY` | 当前官方 Responses 文档列出 `step-3.7-flash` |
 
-GLM、DeepSeek、Kimi、腾讯混元和硅基流动等厂商的已知直连域名如果只提供 Chat Completions，Codex X-Ray 会阻止把该地址误写成 Responses Provider。用户仍可选择真正实现 Responses 的云平台托管入口或自有转换网关。
+当前安装的 Codex 对自定义 Provider 接受 `wire_api = "responses"`。选择 Chat 预设时，X-Ray 会把本机 Responses 地址写入 Codex 配置，并把真实厂商 URL 保存在不含密钥的桥接注册表中。Codex 还会向该地址请求模型目录；X-Ray 返回所选模型 ID 与上下文窗口，使 Codex 能按正确窗口安排压缩。
+
+兼容桥转换消息文本、流式输出、函数定义、工具请求、工具结果和用量计数。Chat Completions 无法表达的 Responses 专属能力会被明确舍弃，包括原生 Web Search、加密 Reasoning 和服务端压缩。关闭主窗口后 X-Ray 会留在系统托盘；真正退出 X-Ray 会停止兼容桥。
 
 ### 让 Codex 桌面端看到环境变量
 
@@ -54,11 +57,11 @@ unset provider_key
 ### 写入与恢复边界
 
 1. 首屏只调用 `config/read`，不会读取 `auth.json`；配置结果中的凭据字段不会被提取、返回前端或保存。
-2. API Key 字段只接受环境变量名。保存配置时不要求、读取或持久化真实 Key；只有用户主动点击“测试连接”时，后端才临时读取该环境变量并发送一次最小 Responses 请求。Key 不返回前端、不写日志、不进入命令行参数。
+2. 直接填写的 API Key 保存在操作系统凭据存储中；`config.toml` 只记录命令式凭据助手。仍可选择环境变量认证。“测试连接”只在 Rust 后端临时读取所选凭据，并按当前协议发送一个最小请求。Key 不返回前端、不写日志、不写 SQLite、不进入命令行参数。
 3. “预览变更”只在界面显示当前与目标 Provider、模型和 Endpoint，不写文件。
 4. “确认切换”调用 `config/batchWrite`，并携带 `config/read` 返回的用户层版本，避免静默覆盖并发修改。
 5. 写入前的 Provider、模型与非敏感 Endpoint 定义保存到 Codex X-Ray 应用数据目录，可通过“恢复上一个”切回；恢复前的状态也会变成新的恢复点。
-6. Provider 变更本身不启动模型回合、不消耗 Codex 额度；“测试连接”会向所选第三方 Provider 发出一次最小请求，可能产生极小 API 费用。新任务或重启 Codex 后使用新配置。
+6. Chat 桥注册表只保存 Provider ID、上游 URL、认证方式、环境变量名、模型 ID 和上下文窗口，不保存 Key。Provider 变更本身不启动模型回合、不消耗 Codex 额度；“测试连接”会向所选第三方 Provider 发出一次最小请求，可能产生极小 API 费用。新任务或重启 Codex 后使用新配置。
 
 ## Codex 可视化配置控制台
 
