@@ -45,46 +45,47 @@ The app checks GitHub Releases at most once per day. When a newer version is ava
 
 Official quota and local Session usage remain separate, with input, cache, output, yearly activity, and API-equivalent cost shown together.
 
-![Codex X-Ray usage overview](docs/assets/usage-overview.en.png)
+[![Codex X-Ray usage overview](docs/assets/usage-overview.en.png)](docs/assets/usage-overview.en.png)
 
 ### Execution timeline
 
 Follow local preparation, user input, LLM output, tool request, Codex execution, result write-back, token accounting, and turn completion in Session order.
 
-![Codex X-Ray execution timeline](docs/assets/execution-trace.en.png)
+[![Codex X-Ray execution timeline](docs/assets/execution-trace.en.png)](docs/assets/execution-trace.en.png)
 
 Every screenshot is generated from a fictional project and simulated Session data. No real user path, conversation, account, or key is included.
 
-## What it does
+## Core features
 
-### Usage
+### Usage and cost
 
-- Displays official account information, quota windows, reset times, Credits, lifetime usage, peak usage, and activity streaks when Codex provides them.
-- Builds a local ledger for today, day, month, model, and project. Each view separates uncached input, cache reads, output, reasoning, total tokens, and API-equivalent cost.
-- Drills down from project to conversation and turn, so token usage and estimated cost can be traced to individual work.
-- Includes a yearly activity heatmap and effective-dated custom model pricing. Local aggregates are incrementally indexed in SQLite.
+Official quota and reset information, plus local token and API-equivalent cost ledgers by day, month, model, project, conversation, and turn. Model pricing can be customized by effective date.
 
 ### Execution trace
 
-- Organizes Codex Sessions by working directory, conversation, and turn.
-- Reconstructs the real event order: local preparation, user input, LLM output, tool request, Codex execution, result write-back, token accounting, compaction, and turn completion.
-- Identifies CLI commands, MCP calls, Skills, browser operations, automation, and sub-agent activity, with available arguments, results, duration, tokens, context use, cache hit rate, and source line references.
-- Analyzes conversations only when requested and keeps the analysis result in X-Ray's SQLite index; original Session files remain unchanged.
+Browse Sessions by project, conversation, and turn, then reconstruct each turn from user input through LLM responses, CLI/MCP/Skill calls, tool results, context changes, token accounting, and completion.
 
-### Console
+### Providers and Codex configuration
 
-- Switches between native Responses providers and OpenAI-compatible Chat Completions providers. Presets include OpenAI and common providers, with a custom-provider editor for base URL, model, context window, and protocol.
-- Runs Chat Completions providers through X-Ray's local compatibility bridge, translating text, streaming responses, function calls, tool results, and usage back to the Responses shape expected by Codex.
-- Stores provider keys in the operating system credential store, or references an environment variable. Keys are not written to `config.toml`.
-- Exposes model, reasoning, verbosity, personality, approval, sandbox, network, history, Memory, compaction, tool, app, sub-agent, goal, and hook settings with explanations.
-- Shows the exact configuration diff before applying it through the Codex App Server and keeps a recoverable previous state.
-- Reports the detected Codex CLI and App Server versions, and can open or copy the paths for config, Sessions, Skills, Plugins, and X-Ray's SQLite index.
+Switch between native Responses providers and OpenAI-compatible Chat providers, manage credentials safely, and edit common Codex settings from a GUI. Every configuration change shows an exact diff and keeps a recoverable previous state.
 
-### Desktop experience
+### Desktop tools
 
-- Chinese and English interfaces with light and dark themes.
-- Closing the main window keeps the app and an active Chat bridge available from the system tray.
-- Checks GitHub Releases at most once per day. A new-version prompt can be dismissed, ignored for that version, or opened for manual download; updates are never installed automatically.
+Chinese and English interfaces, light and dark themes, system tray operation, manual update notifications, version detection, and shortcuts to Codex configuration, Sessions, Skills, Plugins, and X-Ray's SQLite index.
+
+## How Chat providers connect to Codex
+
+Codex never reads the upstream Chat Completions URL. It reads a normal custom Provider from `~/.codex/config.toml`, whose `base_url` points to X-Ray's local bridge and whose `wire_api` remains `responses`.
+
+[![How Codex reads a Chat provider](docs/assets/provider-flow.png)](docs/assets/provider-flow.png)
+
+The API key is stored in the operating system credential store rather than `config.toml`. When Codex needs a Bearer token, the Provider's official `auth.command` invokes X-Ray's credential helper.
+
+### One tool-calling turn
+
+[![One tool call across Responses and Chat](docs/assets/chat-bridge-flow.png)](docs/assets/chat-bridge-flow.png)
+
+The model only chooses a tool and its arguments. Codex performs approval and execution, captures the result, and starts the next model call. The bridge never executes tools; it only translates request fields and streaming events between the two protocols.
 
 ## Data flow
 
@@ -92,8 +93,6 @@ Every screenshot is generated from a fictional project and simulated Session dat
 Codex App Server ──account, quota, catalog, configuration──┐
                                                           ├─ local Rust analysis ─ SQLite index ─ React UI
 $CODEX_HOME/sessions ──read-only JSONL events─────────────┘
-
-Optional Chat provider: Codex Responses request ─ X-Ray bridge ─ vendor /chat/completions
 ```
 
 - Official values keep their original semantics; local derivations and cost estimates are labeled.

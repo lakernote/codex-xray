@@ -1395,4 +1395,148 @@ mod tests {
         upstream_task.abort();
         let _ = fs::remove_file(config_path);
     }
+
+    #[tokio::test]
+    #[ignore = "requires a live OpenAI-compatible Chat Completions provider"]
+    async fn translates_a_live_chat_tool_round_trip() {
+        let upstream_base_url =
+            std::env::var("CODEX_XRAY_LIVE_CHAT_BASE_URL").expect("live Chat base URL");
+        let api_key = std::env::var("CODEX_XRAY_LIVE_CHAT_API_KEY").expect("live Chat API key");
+        let model = std::env::var("CODEX_XRAY_LIVE_CHAT_MODEL").expect("live Chat model");
+        let config_path = std::env::temp_dir().join(format!(
+            "codex-xray-live-chat-bridge-test-{}.json",
+            EVENT_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        let state = ChatBridgeState::load(config_path.clone()).expect("bridge state");
+        state
+            .persist_provider(
+                "live-chat",
+                ChatBridgeProvider {
+                    upstream_base_url,
+                    credential_mode: "environment".to_string(),
+                    env_key: Some("CODEX_XRAY_LIVE_CHAT_API_KEY".to_string()),
+                    model: model.clone(),
+                    context_window: 128_000,
+                },
+            )
+            .expect("persist live provider");
+        let bridge_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bridge listener");
+        let bridge_address = bridge_listener.local_addr().expect("bridge address");
+        let bridge_task = tokio::spawn(async move {
+            axum::serve(bridge_listener, bridge_router(state))
+                .await
+                .expect("serve bridge");
+        });
+        let client = reqwest::Client::new();
+        let tools = json!([{
+            "type": "function",
+            "name": "get_test_value",
+            "description": "Return a test value",
+            "parameters": {
+                "type": "object",
+                "properties": {"name": {"type": "string"}},
+                "required": ["name"]
+            }
+        }]);
+        let first = client
+            .post(format!(
+                "http://{bridge_address}/v1/chat/live-chat/responses"
+            ))
+            .bearer_auth(&api_key)
+            .json(&json!({
+                "model": model,
+                "input": "You must call get_test_value with name xray. Do not answer directly.",
+                "tools": tools,
+                "tool_choice": "auto",
+                "stream": true
+            }))
+            .send()
+            .await
+            .expect("first bridge request");
+        assert_eq!(first.status(), StatusCode::OK);
+        let first_body = first.text().await.expect("first bridge response");
+        let first_events = sse_json_events(&first_body);
+        let function_call = first_events
+            .iter()
+            .find(|event| {
+                event.get("type").and_then(Value::as_str) == Some("response.output_item.done")
+                    && event.pointer("/item/type").and_then(Value::as_str) == Some("function_call")
+            })
+            .and_then(|event| event.get("item"))
+            .expect("function call output");
+        assert_eq!(function_call["name"], "get_test_value");
+        assert!(
+            function_call["arguments"]
+                .as_str()
+                .is_some_and(|arguments| arguments.contains("xray"))
+        );
+
+        let call_id = function_call["call_id"].as_str().expect("function call id");
+        let arguments = function_call["arguments"]
+            .as_str()
+            .expect("function arguments");
+        let second = client
+            .post(format!(
+                "http://{bridge_address}/v1/chat/live-chat/responses"
+            ))
+            .bearer_auth(&api_key)
+            .json(&json!({
+                "model": model,
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": "Call get_test_value, then reply with exactly the returned value."
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": call_id,
+                        "name": "get_test_value",
+                        "arguments": arguments
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": call_id,
+                        "output": "XRAY_TOOL_OK"
+                    }
+                ],
+                "tools": tools,
+                "tool_choice": "auto",
+                "stream": true
+            }))
+            .send()
+            .await
+            .expect("second bridge request");
+        assert_eq!(second.status(), StatusCode::OK);
+        let second_body = second.text().await.expect("second bridge response");
+        let second_events = sse_json_events(&second_body);
+        let output = second_events
+            .iter()
+            .filter(|event| {
+                event.get("type").and_then(Value::as_str) == Some("response.output_text.delta")
+            })
+            .filter_map(|event| event.get("delta").and_then(Value::as_str))
+            .collect::<String>();
+        assert_eq!(output.trim(), "XRAY_TOOL_OK");
+        assert!(second_events.iter().any(|event| {
+            event.get("type").and_then(Value::as_str) == Some("response.completed")
+                && event
+                    .pointer("/response/usage/total_tokens")
+                    .and_then(Value::as_u64)
+                    .is_some_and(|tokens| tokens > 0)
+        }));
+
+        bridge_task.abort();
+        let _ = fs::remove_file(config_path);
+    }
+
+    fn sse_json_events(body: &str) -> Vec<Value> {
+        body.lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .filter(|data| *data != "[DONE]")
+            .filter_map(|data| serde_json::from_str::<Value>(data).ok())
+            .collect()
+    }
 }
