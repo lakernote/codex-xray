@@ -147,6 +147,8 @@ npm run test:rust
 npm run tauri build
 ```
 
+On macOS, the npm wrapper writes development and local release bundles to `src-tauri/target.noindex`. This keeps build copies out of Spotlight, Finder app search, and Launchpad; the installed copy in `/Applications` remains visible.
+
 If `codex` is not on `PATH`, Codex X-Ray attempts to detect the CLI bundled with the Codex/ChatGPT app. You can also set `CODEX_BIN` explicitly.
 
 ## Current limitations

@@ -9,7 +9,7 @@
     "check": "tsc --noEmit",
     "version:check": "node scripts/check-version.mjs",
     "version:set": "node scripts/set-version.mjs",
-    "tauri": "tauri",
+    "tauri": "node scripts/run-tauri.mjs",
     "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml"
   },
   "dependencies": {

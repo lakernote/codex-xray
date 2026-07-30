@@ -244,3 +244,58 @@ jobs:
           prerelease: ${{ needs.prepare.outputs.prerelease }}
           retryAttempts: 0
           args: ${{ matrix.args }}
+
+  finalize:
+    name: Publish release
+    needs:
+      - prepare
+      - verify
+      - publish
+    if: >-
+      ${{
+        always() &&
+        needs.prepare.result == 'success' &&
+        needs.verify.result == 'success' &&
+        (needs.publish.result == 'success' || needs.publish.result == 'skipped')
+      }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Verify installers and publish draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          RELEASE_PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
+        run: |
+          release_json="${RUNNER_TEMP}/release.json"
+          gh release view "${RELEASE_TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --json assets,isDraft,isPrerelease > "${release_json}"
+
+          for suffix in "_aarch64.dmg" "_x64.dmg" "_x64-setup.exe" "_amd64.deb" ".x86_64.rpm"; do
+            if ! jq -e --arg suffix "${suffix}" \
+              '.assets | any(.[]; .name | endswith($suffix))' \
+              "${release_json}" >/dev/null; then
+              echo "::error::Release ${RELEASE_TAG} is missing an installer ending in ${suffix}."
+              exit 1
+            fi
+          done
+
+          if [ "${RELEASE_PRERELEASE}" = "true" ]; then
+            gh release edit "${RELEASE_TAG}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --draft=false \
+              --prerelease
+          else
+            gh release edit "${RELEASE_TAG}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --draft=false \
+              --prerelease=false \
+              --latest
+          fi
+
+          gh release view "${RELEASE_TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --json isDraft,isPrerelease \
+            --jq '"published: draft=\(.isDraft), prerelease=\(.isPrerelease)"'

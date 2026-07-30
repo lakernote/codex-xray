@@ -153,6 +153,8 @@ npm run test:rust
 npm run tauri build
 ```
 
+在 macOS 上，npm 包装脚本会把开发与本地发布 Bundle 写入 `src-tauri/target.noindex`，避免构建副本出现在 Spotlight、Finder 应用搜索和 Launchpad；`/Applications` 中正式安装的副本仍会正常显示。
+
 如果 `codex` 不在 `PATH`，应用会尝试检测 Codex/ChatGPT App 的内置 CLI；也可以通过 `CODEX_BIN` 指定可执行文件。
 
 ## 当前边界
