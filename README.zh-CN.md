@@ -47,6 +47,18 @@ Codex X-Ray 是 Codex 的用量与执行分析工具。它展示额度和 Token�
 
 [![Codex X-Ray 用量概览](docs/assets/usage-overview.zh-CN.png)](docs/assets/usage-overview.zh-CN.png)
 
+### Provider 配置
+
+选择原生 Responses Provider，配置模型与接口地址，并把 API Key 保存在操作系统凭据库。
+
+[![Codex X-Ray Provider 配置](docs/assets/provider-console.zh-CN.png)](docs/assets/provider-console.zh-CN.png)
+
+### Chat 本机代理
+
+通过 X-Ray 本机兼容桥连接 OpenAI Chat Completions 兼容接口，Codex 侧仍然使用 Responses 协议。
+
+[![Codex X-Ray Chat 本机代理](docs/assets/chat-bridge-console.zh-CN.png)](docs/assets/chat-bridge-console.zh-CN.png)
+
 ### 项目、对话与回合账本
 
 按原始工作目录组织项目，继续下钻到对话和 Turn，核对 Token 与成本去向。

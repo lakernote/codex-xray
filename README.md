@@ -47,6 +47,18 @@ Official quota and local Session usage remain separate, with input, cache, outpu
 
 [![Codex X-Ray usage overview](docs/assets/usage-overview.en.png)](docs/assets/usage-overview.en.png)
 
+### Provider configuration
+
+Choose a native Responses provider, configure its model and endpoint, and keep the API key in the operating system credential store.
+
+[![Codex X-Ray provider configuration](docs/assets/provider-console.en.png)](docs/assets/provider-console.en.png)
+
+### Chat compatibility bridge
+
+Connect an OpenAI-compatible Chat Completions endpoint through X-Ray's local bridge while Codex continues to use the Responses protocol.
+
+[![Codex X-Ray Chat compatibility bridge](docs/assets/chat-bridge-console.en.png)](docs/assets/chat-bridge-console.en.png)
+
 ### Execution timeline
 
 Follow local preparation, user input, LLM output, tool request, Codex execution, result write-back, token accounting, and turn completion in Session order.
