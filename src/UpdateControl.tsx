@@ -43,10 +43,35 @@ type Props = {
 
 function readableError(reason: unknown, zh: boolean): string {
   const message = reason instanceof Error ? reason.message : String(reason);
+  const normalized = message.toLowerCase();
+  const missingPlatform = message.match(
+    /platform [`'"]?([^`'"]+)[`'"]? was not found/i,
+  )?.[1];
+  if (
+    missingPlatform ||
+    (normalized.includes("platform") &&
+      normalized.includes("not found") &&
+      normalized.includes("updater"))
+  ) {
+    const platform = missingPlatform ? ` (${missingPlatform})` : "";
+    return zh
+      ? `当前发布缺少这台电脑的升级包${platform}，请从发布页手动下载，或等待下一版本修复。`
+      : `This release has no updater package for this computer${platform}. Download it from Releases or wait for the next version.`;
+  }
   if (message.includes("404")) {
     return zh
       ? "更新服务尚未就绪，请稍后重试。"
       : "The update service is not ready yet. Try again later.";
+  }
+  if (
+    normalized.includes("timed out") ||
+    normalized.includes("timeout") ||
+    normalized.includes("network") ||
+    normalized.includes("failed to fetch")
+  ) {
+    return zh
+      ? "无法连接 GitHub 更新服务，请检查网络后重试。"
+      : "Could not reach the GitHub update service. Check your connection and try again.";
   }
   return message;
 }
@@ -268,8 +293,9 @@ export default function UpdateControl({ locale, onOpenUrl }: Props) {
         )}
 
         {phase === "error" && error && (
-          <small className="sidebar-update-error" role="alert" title={error}>
-            {zh ? "升级检查失败" : "Update check failed"}
+          <small className="sidebar-update-error" role="alert">
+            <strong>{zh ? "升级检查失败" : "Update check failed"}</strong>
+            <span>{error}</span>
           </small>
         )}
       </section>

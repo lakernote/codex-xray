@@ -1027,9 +1027,16 @@ export default function ProviderView({
                 : "Review and edit user-level Codex configuration"}
           </span>
         </div>
-        <div className="topbar-actions">
+        <div
+          className={`topbar-actions${activeSection === "provider" ? " provider-topbar-actions" : ""}`}
+        >
           {activeSection !== "diagnostics" && (
-            <span>
+            <span
+              className={`provider-sync-status${loading ? " loading" : ""}`}
+              role="status"
+              aria-live="polite"
+            >
+              <i aria-hidden="true" />
               {loading
                 ? zh
                   ? "正在读取配置"
@@ -1041,10 +1048,15 @@ export default function ProviderView({
           )}
           {activeSection === "provider" && (
             <button
-              className={loading ? "refresh-button spinning" : "refresh-button"}
+              className={
+                loading
+                  ? "refresh-button provider-refresh-button spinning"
+                  : "refresh-button provider-refresh-button"
+              }
               onClick={() => void load()}
               disabled={loading || saving}
-              aria-label={zh ? "刷新控制台" : "Refresh control center"}
+              title={zh ? "重新读取模型配置" : "Reload model configuration"}
+              aria-label={zh ? "重新读取模型配置" : "Reload model configuration"}
             >
               <RefreshCw aria-hidden="true" />
             </button>
@@ -1081,8 +1093,14 @@ export default function ProviderView({
       {activeSection === "provider" ? (
         <>
       <section className="provider-active">
-        <div>
-          <p>{zh ? "当前接入" : "Active connection"}</p>
+        <div className="provider-active-identity">
+          <div className="provider-active-heading">
+            <p>{zh ? "当前接入" : "Active connection"}</p>
+            <span>
+              <CheckCircle2 aria-hidden="true" />
+              {zh ? "正在使用" : "In use"}
+            </span>
+          </div>
           <h2>
             {activeProfile?.name ??
               activeDefinition?.name ??
@@ -1221,28 +1239,34 @@ export default function ProviderView({
                       </small>
                     </span>
                   </button>
-                  <button
-                    type="button"
-                    className="provider-profile-activate"
-                    disabled={active || saving || !profile.credential_available}
-                    onClick={() => void activateProfile(profile)}
-                    aria-label={
-                      active
-                        ? zh
-                          ? `${profile.name} 当前已启用`
-                          : `${profile.name} is active`
-                        : zh
+                  {active ? (
+                    <span
+                      className="provider-profile-active-state"
+                      aria-label={
+                        zh
+                          ? `${profile.name} 当前正在使用`
+                          : `${profile.name} is currently in use`
+                      }
+                    >
+                      <CheckCircle2 aria-hidden="true" />
+                      {zh ? "使用中" : "Active"}
+                    </span>
+                  ) : (
+                    <button
+                      type="button"
+                      className="provider-profile-activate"
+                      disabled={saving || !profile.credential_available}
+                      onClick={() => void activateProfile(profile)}
+                      aria-label={
+                        zh
                           ? `启用 ${profile.name}`
                           : `Activate ${profile.name}`
-                    }
-                  >
-                    {active ? (
-                      <CheckCircle2 aria-hidden="true" />
-                    ) : (
+                      }
+                    >
                       <Power aria-hidden="true" />
-                    )}
-                    {active ? (zh ? "使用中" : "Active") : zh ? "启用" : "Use"}
-                  </button>
+                      {zh ? "启用" : "Use"}
+                    </button>
+                  )}
                 </div>
               );
             })}

@@ -93,6 +93,20 @@ jobs:
             printf '{"assets":[]}\n' > "${release_json}"
           fi
 
+          updater_json="${RUNNER_TEMP}/latest.json"
+          printf '{"platforms":{}}\n' > "${updater_json}"
+          updater_asset_id="$(
+            jq -r '.assets[] | select(.name == "latest.json") | .id' \
+              "${release_json}" \
+              | head -n 1
+          )"
+          if [ -n "${updater_asset_id}" ]; then
+            gh api \
+              -H "Accept: application/octet-stream" \
+              "repos/${GITHUB_REPOSITORY}/releases/assets/${updater_asset_id}" \
+              > "${updater_json}"
+          fi
+
           include='[]'
           add_target() {
             include="$(jq -cn \
@@ -106,16 +120,41 @@ jobs:
               '.assets | any(.[]; .name | endswith($suffix))' \
               "${release_json}" >/dev/null
           }
+          has_updater_platform() {
+            jq -e --arg platform "$1" '
+              .platforms[$platform]
+              | (.url | type == "string" and length > 0)
+                and (.signature | type == "string" and length > 0)
+            ' "${updater_json}" >/dev/null
+          }
           mac_target_complete() {
-            has_asset "$1.dmg"
+            has_asset "$1.dmg" &&
+              has_asset "$1.app.tar.gz" &&
+              has_asset "$1.app.tar.gz.sig" &&
+              has_updater_platform "$2" &&
+              has_updater_platform "$2-app"
           }
           windows_target_complete() {
-            has_asset "$1-setup.exe"
+            has_asset "$1-setup.exe" &&
+              has_asset "$1-setup.exe.sig" &&
+              has_updater_platform "windows-x86_64" &&
+              has_updater_platform "windows-x86_64-nsis"
+          }
+          linux_targets_complete() {
+            has_asset "_amd64.deb" &&
+              has_asset "_amd64.deb.sig" &&
+              has_asset ".x86_64.rpm" &&
+              has_asset ".x86_64.rpm.sig" &&
+              has_updater_platform "linux-x86_64" &&
+              has_updater_platform "linux-x86_64-deb" &&
+              has_updater_platform "linux-x86_64-rpm"
           }
 
-          mac_target_complete "_aarch64" || add_target macos-latest "--target aarch64-apple-darwin --bundles dmg"
-          mac_target_complete "_x64" || add_target macos-latest "--target x86_64-apple-darwin --bundles dmg"
-          if ! has_asset "_amd64.deb" || ! has_asset ".x86_64.rpm"; then
+          mac_target_complete "_aarch64" "darwin-aarch64" ||
+            add_target macos-latest "--target aarch64-apple-darwin --bundles app,dmg"
+          mac_target_complete "_x64" "darwin-x86_64" ||
+            add_target macos-latest "--target x86_64-apple-darwin --bundles app,dmg"
+          if ! linux_targets_complete; then
             add_target ubuntu-22.04 "--bundles deb,rpm"
           fi
           windows_target_complete "_x64" || add_target windows-latest "--bundles nsis"
@@ -273,7 +312,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Verify installers and publish draft
+      - name: Verify installers, updater manifest, and publish draft
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
@@ -289,6 +328,52 @@ jobs:
               '.assets | any(.[]; .name | endswith($suffix))' \
               "${release_json}" >/dev/null; then
               echo "::error::Release ${RELEASE_TAG} is missing an installer ending in ${suffix}."
+              exit 1
+            fi
+          done
+
+          for suffix in "_aarch64.app.tar.gz" "_aarch64.app.tar.gz.sig" "_x64.app.tar.gz" "_x64.app.tar.gz.sig"; do
+            if ! jq -e --arg suffix "${suffix}" \
+              '.assets | any(.[]; .name | endswith($suffix))' \
+              "${release_json}" >/dev/null; then
+              echo "::error::Release ${RELEASE_TAG} is missing a macOS updater artifact ending in ${suffix}."
+              exit 1
+            fi
+          done
+
+          for suffix in "_x64-setup.exe.sig" "_amd64.deb.sig" ".x86_64.rpm.sig"; do
+            if ! jq -e --arg suffix "${suffix}" \
+              '.assets | any(.[]; .name | endswith($suffix))' \
+              "${release_json}" >/dev/null; then
+              echo "::error::Release ${RELEASE_TAG} is missing an updater signature ending in ${suffix}."
+              exit 1
+            fi
+          done
+
+          updater_dir="${RUNNER_TEMP}/updater"
+          mkdir -p "${updater_dir}"
+          gh release download "${RELEASE_TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern "latest.json" \
+            --dir "${updater_dir}"
+
+          updater_json="${updater_dir}/latest.json"
+          for platform in \
+            "darwin-aarch64" \
+            "darwin-aarch64-app" \
+            "darwin-x86_64" \
+            "darwin-x86_64-app" \
+            "windows-x86_64" \
+            "windows-x86_64-nsis" \
+            "linux-x86_64" \
+            "linux-x86_64-deb" \
+            "linux-x86_64-rpm"; do
+            if ! jq -e --arg platform "${platform}" '
+              .platforms[$platform]
+              | (.url | type == "string" and length > 0)
+                and (.signature | type == "string" and length > 0)
+            ' "${updater_json}" >/dev/null; then
+              echo "::error::Updater manifest for ${RELEASE_TAG} is missing a signed ${platform} package."
               exit 1
             fi
           done
