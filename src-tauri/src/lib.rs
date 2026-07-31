@@ -1037,22 +1037,35 @@ pub fn run() {
             app.manage(chat_bridge.clone());
             tauri::async_runtime::spawn(chat_bridge::serve(chat_bridge));
 
-            let open_item = MenuItem::with_id(
+            let open_item =
+                MenuItem::with_id(app, "show_main", "打开 Codex X-Ray", true, None::<&str>)?;
+            let background_item = MenuItem::with_id(
                 app,
-                "show_main",
-                "Open Codex X-Ray / 打开 Codex X-Ray",
-                true,
+                "background_status",
+                "关闭窗口后继续运行",
+                false,
                 None::<&str>,
             )?;
             let separator = PredefinedMenuItem::separator(app)?;
-            let quit_item = MenuItem::with_id(app, "quit", "Quit / 退出", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&open_item, &separator, &quit_item])?;
+            let quit_item = MenuItem::with_id(app, "quit", "退出 Codex X-Ray", true, None::<&str>)?;
+            let menu =
+                Menu::with_items(app, &[&open_item, &background_item, &separator, &quit_item])?;
             let mut tray = TrayIconBuilder::with_id("codex-xray")
                 .menu(&menu)
                 .tooltip("Codex X-Ray · Usage, trace & control")
                 .icon_as_template(false);
-            if let Some(icon) = app.default_window_icon().cloned() {
-                tray = tray.icon(icon);
+
+            #[cfg(target_os = "macos")]
+            {
+                // Keep close-to-menu-bar behavior visible in light and dark appearances.
+                tray = tray.title("X-Ray");
+            }
+
+            #[cfg(not(target_os = "macos"))]
+            {
+                if let Some(icon) = app.default_window_icon().cloned() {
+                    tray = tray.icon(icon);
+                }
             }
             tray.on_menu_event(|app, event| match event.id().as_ref() {
                 "show_main" => {

@@ -165,7 +165,7 @@ npm run tauri build
 - 独立 App Server 无法保证看到另一个 Codex App 进程的全部瞬时状态；界面会区分官方状态与本地事件推断。
 - Codex App Server 与 Session 格式仍可能变化，兼容性以当前安装版本为准。
 - Chat 兼容桥转换文本、流式输出、函数工具、工具结果和 Token 用量；原生 Web Search、加密 Reasoning、服务端压缩等 Responses 专属能力不会被转换。
-- 使用 Chat Provider 时需要保持 Codex X-Ray 运行；关闭主窗口后应用会留在系统托盘。
+- 使用 Chat 接入时需要保持 Codex X-Ray 运行；点击窗口左上角红色关闭按钮只会隐藏窗口。macOS 顶部菜单栏会保留 `X-Ray` 入口，可重新打开窗口或彻底退出。
 - 当前主要在 macOS 上验证；发布流程覆盖 Windows、Linux 和 macOS。
 
 ## License

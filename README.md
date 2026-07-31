@@ -159,7 +159,7 @@ If `codex` is not on `PATH`, Codex X-Ray attempts to detect the CLI bundled with
 - A separate App Server cannot always observe every transient state inside another Codex App process. The UI distinguishes official states from local-event inference.
 - Codex App Server and Session formats may evolve; compatibility follows the locally installed version.
 - The Chat bridge translates text, streaming output, function tools, tool results, and token usage. Responses-only features such as native Web Search, encrypted reasoning, and server-side compaction are not translated.
-- Chat providers require Codex X-Ray to remain running; closing the window keeps it in the system tray.
+- Chat providers require Codex X-Ray to remain running. Closing the window hides it; on macOS, use the `X-Ray` menu-bar item to reopen the window or quit the app completely.
 - The project is currently validated primarily on macOS. Release builds cover Windows, Linux, and macOS.
 
 ## License
