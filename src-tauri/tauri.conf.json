@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Codex X-Ray",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "identifier": "app.codexxray.desktop",
   "build": {
     "beforeDevCommand": "npm run dev",
