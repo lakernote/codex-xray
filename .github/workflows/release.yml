@@ -227,6 +227,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           APPLE_SIGNING_IDENTITY: ${{ matrix.platform == 'macos-latest' && '-' || '' }}
+          CARGO_TARGET_DIR: ${{ github.workspace }}/src-tauri/target
         with:
           tagName: ${{ needs.prepare.outputs.tag }}
           releaseName: "Codex X-Ray ${{ needs.prepare.outputs.tag }}"
