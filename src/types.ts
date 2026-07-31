@@ -243,10 +243,12 @@ export type ProviderDefinition = {
   credential_source:
     | "builtin"
     | "keychain"
+    | "file"
     | "environment"
     | "command"
     | "none";
   credential_available: boolean;
+  credential_path: string | null;
   auth_command: string | null;
   auth_args: string[];
   wire_api: string;
@@ -268,8 +270,32 @@ export type ProviderSnapshot = {
   active_model: string | null;
   models: ModelOption[];
   providers: ProviderDefinition[];
+  profiles: ProviderProfile[];
   restore_available: boolean;
   warnings: string[];
+};
+
+export type ProviderProfile = {
+  id: string;
+  name: string;
+  provider_id: string;
+  provider_name: string;
+  model: string;
+  base_url: string | null;
+  env_key: string | null;
+  credential_mode:
+    | "builtin"
+    | "keychain"
+    | "file"
+    | "environment"
+    | "command"
+    | "none";
+  credential_available: boolean;
+  credential_path: string | null;
+  protocol: "responses" | "chat_completions";
+  context_window: number;
+  builtin: boolean;
+  updated_at: string;
 };
 
 export type ModelOption = {
@@ -282,12 +308,13 @@ export type ModelOption = {
 };
 
 export type ProviderApplyRequest = {
+  profile_name: string | null;
   provider_id: string;
   model: string;
   name: string | null;
   base_url: string | null;
   env_key: string | null;
-  credential_mode: "keychain" | "environment" | "none" | null;
+  credential_mode: "file" | "environment" | "none" | null;
   api_key: string | null;
   protocol: "responses" | "chat_completions";
   context_window: number;
@@ -306,6 +333,26 @@ export type ProviderTestResult = {
   latency_ms: number;
   http_status: number | null;
   message: string;
+  capabilities: ProviderCapability[];
+};
+
+export type ProviderCapability = {
+  capability:
+    | "model_catalog"
+    | "text_generation"
+    | "function_tools"
+    | "image_input"
+    | "builtin_tools"
+    | "reasoning_compaction"
+    | "context_window";
+  status:
+    | "verified"
+    | "failed"
+    | "bridge_supported"
+    | "limited"
+    | "unverified"
+    | "configured";
+  value: string | null;
 };
 
 export type ChatBridgeStatus = {

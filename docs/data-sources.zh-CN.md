@@ -35,8 +35,10 @@ Codex 当前的自定义 Provider 使用 `wire_api = "responses"`。界面里的
 | 火山方舟 / 豆包 | 厂商原生 Responses | `https://ark.cn-beijing.volces.com/api/v3` | `ARK_API_KEY` | 模型 ID 需与方舟控制台/文档一致 |
 | 智谱 GLM | 本机 Chat 桥 | `https://open.bigmodel.cn/api/paas/v4` | `ZHIPUAI_API_KEY` | X-Ray 把 Codex Responses 流转换到厂商文档中的 `/chat/completions` |
 | DeepSeek | 本机 Chat 桥 | `https://api.deepseek.com` | `DEEPSEEK_API_KEY` | X-Ray 在本机转换流式文本和函数工具调用 |
+| Kimi | 本机 Chat 桥 | `https://api.moonshot.cn/v1` | `MOONSHOT_API_KEY` | 官方 Chat 接口，X-Ray 在本机转换流式文本和函数工具调用 |
 | MiniMax | 厂商原生 Responses | `https://api.minimaxi.com/v1` | `MINIMAX_API_KEY` | 官方提供 Codex 桌面端接入说明 |
-| StepFun | 厂商原生 Responses | `https://api.stepfun.com/v1` | `STEP_API_KEY` | 当前官方 Responses 文档列出 `step-3.7-flash` |
+| 小米 MiMo | 厂商原生 Responses | `https://api.xiaomimimo.com/v1` | `MIMO_API_KEY` | 官方提供 Codex 与 Responses API 接入说明 |
+| 自定义 API | 原生 Responses 或本机 Chat 桥 | 用户填写 | 用户填写 | 其余厂商通过自定义方案接入 |
 
 当前安装的 Codex 对自定义 Provider 接受 `wire_api = "responses"`。选择 Chat 预设时，X-Ray 会把本机 Responses 地址写入 Codex 配置，并把真实厂商 URL 保存在不含密钥的桥接注册表中。Codex 还会向该地址请求模型目录；X-Ray 返回所选模型 ID 与上下文窗口，使 Codex 能按正确窗口安排压缩。
 
@@ -57,11 +59,11 @@ unset provider_key
 ### 写入与恢复边界
 
 1. 首屏只调用 `config/read`，不会读取 `auth.json`；配置结果中的凭据字段不会被提取、返回前端或保存。
-2. 直接填写的 API Key 保存在操作系统凭据存储中；`config.toml` 只记录命令式凭据助手。仍可选择环境变量认证。“测试连接”只在 Rust 后端临时读取所选凭据，并按当前协议发送一个最小请求。Key 不返回前端、不写日志、不写 SQLite、不进入命令行参数。
+2. 直接填写的 API Key 统一保存到 `~/.codex/codex-xray/credentials/` 下的用户专属文件；`config.toml` 只记录命令式凭据助手。仍可选择环境变量认证。“测试连接”只在 Rust 后端临时读取所选凭据，并按当前协议发送一个最小请求。Key 不返回前端、不写日志、不写 SQLite、不进入命令行参数。
 3. “预览变更”只在界面显示当前与目标 Provider、模型和 Endpoint，不写文件。
 4. “确认切换”调用 `config/batchWrite`，并携带 `config/read` 返回的用户层版本，避免静默覆盖并发修改。
 5. 写入前的 Provider、模型与非敏感 Endpoint 定义保存到 Codex X-Ray 应用数据目录，可通过“恢复上一个”切回；恢复前的状态也会变成新的恢复点。
-6. Chat 桥注册表只保存 Provider ID、上游 URL、认证方式、环境变量名、模型 ID 和上下文窗口，不保存 Key。Provider 变更本身不启动模型回合、不消耗 Codex 额度；“测试连接”会向所选第三方 Provider 发出一次最小请求，可能产生极小 API 费用。新任务或重启 Codex 后使用新配置。
+6. Chat 桥注册表只保存接入 ID、上游 URL、认证方式、环境变量名、模型 ID 和上下文窗口，不保存 Key。切换模型接入本身不启动模型回合、不消耗 Codex 额度；“测试连接”会向所选第三方模型服务发出一次最小请求，可能产生极小 API 费用。新任务或重启 Codex 后使用新配置。
 
 ## Codex 可视化配置控制台
 
@@ -217,7 +219,8 @@ Codex X-Ray：
 - [阿里百炼 Responses API](https://help.aliyun.com/zh/model-studio/qwen-api-via-openai-responses)
 - [火山方舟 Responses API](https://www.volcengine.com/docs/82379/1795150)
 - [百度千帆 Responses API](https://cloud.baidu.com/doc/qianfan-docs/s/4mi400l1m)
+- [Kimi K2.6](https://platform.kimi.com/docs/guide/kimi-k2-6-quickstart)
 - [MiniMax Codex 接入](https://platform.minimaxi.com/docs/token-plan/codex)
-- [StepFun Responses API](https://platform.stepfun.com/docs/zh/api-reference/responses/responses-create)
+- [小米 MiMo Codex 接入](https://mimo.mi.com/docs/en-US/tokenplan/integration/codex-configuration)
 
 `account/usage/read` 等账户字段以当前安装的 Codex App Server 生成 schema 为兼容依据。App Server 文档提示部分接口可能仍在演进，Codex X-Ray 会在兼容层中处理字段缺失。

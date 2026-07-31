@@ -18,11 +18,13 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
-use crate::provider::read_credential;
+use crate::provider::read_file_credential;
 
 pub const CHAT_BRIDGE_PORT: u16 = 32_198;
 const CHAT_BRIDGE_VERSION: u32 = 1;
 const MAX_REQUEST_BYTES: usize = 32 * 1024 * 1024;
+const OMITTED_IMAGE_PLACEHOLDER: &str =
+    "[Earlier image omitted because this Chat provider accepts text input only.]";
 static EVENT_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -355,6 +357,12 @@ async fn responses(
             .text()
             .await
             .unwrap_or_else(|error| format!("无法读取上游错误：{error}"));
+        if upstream_message_too_large(&body) {
+            return json_error(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "Chat 上游拒绝了超过 1 MB 的消息内容。常见原因是当前任务带有图片，或长期会话中保留了很大的工具输出。这个兼容桥按文本模型工作：请移除本轮图片后重试；若图片只存在于历史记录，可直接发送一条纯文本消息，X-Ray 会省略旧图片；需要识图时请改用支持图片的原生 Responses Provider。".to_string(),
+            );
+        }
         return (
             status,
             [(header::CONTENT_TYPE, "application/json; charset=utf-8")],
@@ -475,12 +483,16 @@ async fn bridge_credential(
         .and_then(|value| value.strip_prefix("Bearer "));
     match provider.credential_mode.as_str() {
         "keychain" => {
+            Err("这套配置仍使用旧钥匙串认证，请在“模型接入”中重新保存 API Key。".to_string())
+        }
+        "file" => {
             let provider_id = provider_id.to_string();
-            let credential = tokio::task::spawn_blocking(move || read_credential(&provider_id))
-                .await
-                .map_err(|error| format!("读取系统凭据任务失败：{error}"))??;
+            let credential =
+                tokio::task::spawn_blocking(move || read_file_credential(&provider_id))
+                    .await
+                    .map_err(|error| format!("读取凭据文件任务失败：{error}"))??;
             if inbound != Some(credential.as_str()) {
-                return Err("本地兼容桥认证失败，请重新保存这个 Provider 的 API Key。".to_string());
+                return Err("本地兼容桥认证失败，请重新保存这个 Provider 的凭据文件。".to_string());
             }
             Ok(Some(credential))
         }
@@ -529,8 +541,11 @@ pub fn responses_to_chat(request: &Value) -> Result<Value, String> {
             messages.push(json!({"role": "user", "content": content}));
         }
         Some(Value::Array(items)) => {
-            for item in items {
-                if let Some(message) = response_input_to_chat_message(item)? {
+            let latest_user_message = items.iter().rposition(is_user_message);
+            for (index, item) in items.iter().enumerate() {
+                if let Some(message) =
+                    response_input_to_chat_message(item, latest_user_message == Some(index))?
+                {
                     push_chat_message(&mut messages, message);
                 }
             }
@@ -597,11 +612,21 @@ fn push_chat_message(messages: &mut Vec<Value>, mut message: Value) {
     messages.push(message);
 }
 
-fn response_input_to_chat_message(item: &Value) -> Result<Option<Value>, String> {
+fn is_user_message(item: &Value) -> bool {
+    matches!(
+        item.get("type").and_then(Value::as_str),
+        Some("message") | None
+    ) && item.get("role").and_then(Value::as_str) == Some("user")
+}
+
+fn response_input_to_chat_message(
+    item: &Value,
+    latest_user_message: bool,
+) -> Result<Option<Value>, String> {
     match item.get("type").and_then(Value::as_str) {
         Some("message") | None => {
             let role = item.get("role").and_then(Value::as_str).unwrap_or("user");
-            let content = response_content_to_chat(item.get("content"));
+            let content = response_content_to_chat(item.get("content"), latest_user_message)?;
             Ok(Some(json!({"role": role, "content": content})))
         }
         Some("function_call") => {
@@ -647,34 +672,60 @@ fn response_input_to_chat_message(item: &Value) -> Result<Option<Value>, String>
     }
 }
 
-fn response_content_to_chat(content: Option<&Value>) -> Value {
+fn response_content_to_chat(
+    content: Option<&Value>,
+    latest_user_message: bool,
+) -> Result<Value, String> {
     match content {
-        Some(Value::String(content)) => json!(content),
+        Some(Value::String(content)) => Ok(json!(content)),
         Some(Value::Array(parts)) => {
-            let converted = parts
-                .iter()
-                .filter_map(|part| match part.get("type").and_then(Value::as_str) {
-                    Some("input_text") | Some("output_text") | Some("text") => Some(json!({
+            let mut converted = Vec::new();
+            for part in parts {
+                match part.get("type").and_then(Value::as_str) {
+                    Some("input_text") | Some("output_text") | Some("text") => {
+                        converted.push(json!({
+                            "type": "text",
+                            "text": part.get("text").and_then(Value::as_str).unwrap_or_default()
+                        }));
+                    }
+                    Some("input_image") if latest_user_message => {
+                        let bytes = part
+                            .get("image_url")
+                            .and_then(Value::as_str)
+                            .map(str::len)
+                            .unwrap_or_default();
+                        return Err(format!(
+                            "当前 Chat Provider 按文本模型运行，本轮包含图片（约 {:.1} KB），无法可靠转给上游。请移除图片后重试，或切换到支持图片的原生 Responses Provider。",
+                            bytes as f64 / 1024.0
+                        ));
+                    }
+                    Some("input_image") => converted.push(json!({
                         "type": "text",
-                        "text": part.get("text").and_then(Value::as_str).unwrap_or_default()
+                        "text": OMITTED_IMAGE_PLACEHOLDER
                     })),
-                    Some("input_image") => part.get("image_url").and_then(Value::as_str).map(
-                        |image_url| json!({"type": "image_url", "image_url": {"url": image_url}}),
-                    ),
-                    _ => None,
-                })
-                .collect::<Vec<_>>();
+                    _ => {}
+                }
+            }
             if converted.len() == 1
                 && converted[0].get("type").and_then(Value::as_str) == Some("text")
             {
-                converted[0].get("text").cloned().unwrap_or(Value::Null)
+                Ok(converted[0].get("text").cloned().unwrap_or(Value::Null))
             } else {
-                Value::Array(converted)
+                Ok(Value::Array(converted))
             }
         }
-        Some(other) => json!(value_to_text(other)),
-        None => Value::Null,
+        Some(other) => Ok(json!(value_to_text(other))),
+        None => Ok(Value::Null),
     }
+}
+
+fn upstream_message_too_large(body: &str) -> bool {
+    let normalized = body.to_ascii_lowercase();
+    (normalized.contains("messages.text") || normalized.contains("message.text"))
+        && (normalized.contains("1048576")
+            || normalized.contains("1,048,576")
+            || normalized.contains("too large")
+            || normalized.contains("length must be less"))
 }
 
 fn value_to_text(value: &Value) -> String {
@@ -1247,6 +1298,60 @@ mod tests {
         );
         assert_eq!(messages[2]["role"], "tool");
         assert_eq!(messages[3]["role"], "tool");
+    }
+
+    #[test]
+    fn rejects_an_image_in_the_latest_user_message() {
+        let error = responses_to_chat(&json!({
+            "model": "chat-model",
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "What is shown?"},
+                    {"type": "input_image", "image_url": "data:image/png;base64,AAAA"}
+                ]
+            }]
+        }))
+        .expect_err("latest image must be rejected for a text-only bridge");
+        assert!(error.contains("本轮包含图片"));
+        assert!(error.contains("原生 Responses"));
+    }
+
+    #[test]
+    fn omits_earlier_images_but_keeps_the_latest_text_message() {
+        let chat = responses_to_chat(&json!({
+            "model": "chat-model",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "Earlier screenshot"},
+                        {"type": "input_image", "image_url": "data:image/png;base64,AAAA"}
+                    ]
+                },
+                {"type": "message", "role": "assistant", "content": "I saw it."},
+                {"type": "message", "role": "user", "content": "Continue without the image."}
+            ]
+        }))
+        .expect("historical images should be omitted");
+        let messages = chat["messages"].as_array().expect("messages");
+        assert_eq!(messages.len(), 3);
+        assert!(
+            messages[0]["content"]
+                .to_string()
+                .contains(OMITTED_IMAGE_PLACEHOLDER)
+        );
+        assert_eq!(messages[2]["content"], "Continue without the image.");
+    }
+
+    #[test]
+    fn recognizes_the_upstream_one_megabyte_message_error() {
+        assert!(upstream_message_too_large(
+            "'$.payload.messages.text' length must be less or equal than 1048576;"
+        ));
+        assert!(!upstream_message_too_large("invalid model"));
     }
 
     #[test]

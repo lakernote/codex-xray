@@ -26,9 +26,11 @@ use pricing::{
 };
 use provider::{
     ProviderApplyRequest, ProviderSnapshot, ProviderTestResult, build_apply_edits,
-    build_provider_snapshot, delete_credential, enrich_provider_snapshot_with_bridge,
-    persist_request_credential, probe_provider, read_restore_point, restore_edits, restore_point,
-    rollback_credential, save_restore_point,
+    build_provider_snapshot, codex_catalog_capabilities, delete_credential,
+    enrich_provider_snapshot_with_bridge, enrich_provider_snapshot_with_profiles,
+    persist_active_profile, persist_request_credential, persist_request_profile, probe_provider,
+    read_restore_point, restore_edits, restore_point, rollback_credential, rollback_profile,
+    save_restore_point,
 };
 use settings::{
     SettingsApplyRequest, SettingsSnapshot, build_settings_edits, build_settings_snapshot,
@@ -54,6 +56,7 @@ struct UsageState {
     pricing_config_path: PathBuf,
     cost_scan: Arc<Mutex<()>>,
     trace_scan: Arc<Mutex<TraceIndexCache>>,
+    provider_profiles_path: PathBuf,
     provider_restore_path: PathBuf,
     settings_restore_path: PathBuf,
 }
@@ -169,8 +172,11 @@ fn open_external(url: String) -> Result<(), String> {
         "https://help.aliyun.com/",
         "https://www.volcengine.com/",
         "https://cloud.baidu.com/",
+        "https://docs.bigmodel.cn/",
+        "https://api-docs.deepseek.com/",
         "https://platform.minimaxi.com/",
-        "https://platform.stepfun.com/",
+        "https://platform.kimi.com/",
+        "https://mimo.mi.com/",
         "https://github.com/lakernote/codex-xray/releases",
     ];
     if url.contains(['\r', '\n']) || !allowed.iter().any(|prefix| url.starts_with(prefix)) {
@@ -577,6 +583,7 @@ async fn get_provider_config(
 ) -> Result<ProviderSnapshot, String> {
     let client = Arc::clone(&state.client);
     let codex_state_dir = state.codex_state_dir.clone();
+    let profiles_path = state.provider_profiles_path.clone();
     let restore_path = state.provider_restore_path.clone();
     let bridge = bridge.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
@@ -612,6 +619,7 @@ async fn get_provider_config(
                 .warnings
                 .push(format!("官方模型目录暂不可用：{error}")),
         }
+        enrich_provider_snapshot_with_profiles(&mut snapshot, &profiles_path)?;
         Ok(snapshot)
     })
     .await
@@ -626,6 +634,7 @@ async fn apply_provider_config(
 ) -> Result<ProviderSnapshot, String> {
     let client = Arc::clone(&state.client);
     let codex_state_dir = state.codex_state_dir.clone();
+    let profiles_path = state.provider_profiles_path.clone();
     let restore_path = state.provider_restore_path.clone();
     let bridge = bridge.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
@@ -641,6 +650,9 @@ async fn apply_provider_config(
         let client = guard.as_mut().expect("client is initialized");
         let before_raw = client.read_config().map_err(|error| error.to_string())?;
         let before = build_provider_snapshot(&before_raw, &restore_path)?;
+        let mut active_profile = before.clone();
+        enrich_provider_snapshot_with_bridge(&mut active_profile, &bridge);
+        persist_active_profile(&profiles_path, &active_profile)?;
         let (edits, _) = build_apply_edits(&request)?;
         let credential_update = persist_request_credential(&request)?;
         let bridge_update = if request.protocol == "chat_completions" {
@@ -670,7 +682,18 @@ async fn apply_provider_config(
         } else {
             None
         };
+        let profile_update = match persist_request_profile(&profiles_path, &request) {
+            Ok(update) => update,
+            Err(error) => {
+                if let Some(update) = bridge_update {
+                    bridge.rollback_provider(update);
+                }
+                rollback_credential(credential_update);
+                return Err(error);
+            }
+        };
         if let Err(error) = client.batch_write_config(edits, request.expected_version) {
+            rollback_profile(&profiles_path, profile_update);
             if let Some(update) = bridge_update {
                 bridge.rollback_provider(update);
             }
@@ -688,6 +711,7 @@ async fn apply_provider_config(
         save_restore_point(&restore_path, &restore_point(&before))?;
         after.restore_available = true;
         enrich_provider_snapshot_with_bridge(&mut after, &bridge);
+        enrich_provider_snapshot_with_profiles(&mut after, &profiles_path)?;
         Ok(after)
     })
     .await
@@ -695,10 +719,66 @@ async fn apply_provider_config(
 }
 
 #[tauri::command]
-async fn clear_provider_credential(provider_id: String) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || delete_credential(&provider_id))
-        .await
-        .map_err(|error| format!("删除 Provider 凭据的后台任务异常：{error}"))?
+async fn save_provider_profile(
+    state: tauri::State<'_, UsageState>,
+    bridge: tauri::State<'_, ChatBridgeState>,
+    request: ProviderApplyRequest,
+) -> Result<(), String> {
+    let profiles_path = state.provider_profiles_path.clone();
+    let bridge = bridge.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _ = build_apply_edits(&request)?;
+        let credential_update = persist_request_credential(&request)?;
+        let bridge_update = if request.protocol == "chat_completions" {
+            let upstream_base_url = request
+                .base_url
+                .clone()
+                .ok_or_else(|| "Chat Completions Provider 缺少 API Base URL。".to_string())?;
+            match bridge.persist_provider(
+                &request.provider_id,
+                ChatBridgeProvider {
+                    upstream_base_url,
+                    credential_mode: request
+                        .credential_mode
+                        .clone()
+                        .unwrap_or_else(|| "none".to_string()),
+                    env_key: request.env_key.clone(),
+                    model: request.model.clone(),
+                    context_window: request.context_window,
+                },
+            ) {
+                Ok(update) => Some(update),
+                Err(error) => {
+                    rollback_credential(credential_update);
+                    return Err(error);
+                }
+            }
+        } else {
+            None
+        };
+        if let Err(error) = persist_request_profile(&profiles_path, &request) {
+            if let Some(update) = bridge_update {
+                bridge.rollback_provider(update);
+            }
+            rollback_credential(credential_update);
+            return Err(error);
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|error| format!("Provider 方案保存任务异常：{error}"))?
+}
+
+#[tauri::command]
+async fn clear_provider_credential(
+    provider_id: String,
+    credential_mode: Option<String>,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        delete_credential(&provider_id, credential_mode.as_deref())
+    })
+    .await
+    .map_err(|error| format!("删除 Provider 凭据的后台任务异常：{error}"))?
 }
 
 #[tauri::command]
@@ -751,6 +831,7 @@ async fn test_provider_connection(
                     "Codex 官方 model/list 未返回 {model}。请从当前模型建议中选择，或刷新后再试。"
                 )
             },
+            capabilities: codex_catalog_capabilities(found),
         })
     })
     .await
@@ -764,6 +845,7 @@ async fn restore_provider_config(
 ) -> Result<ProviderSnapshot, String> {
     let client = Arc::clone(&state.client);
     let codex_state_dir = state.codex_state_dir.clone();
+    let profiles_path = state.provider_profiles_path.clone();
     let restore_path = state.provider_restore_path.clone();
     let bridge = bridge.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
@@ -780,6 +862,9 @@ async fn restore_provider_config(
         let client = guard.as_mut().expect("client is initialized");
         let before_raw = client.read_config().map_err(|error| error.to_string())?;
         let before = build_provider_snapshot(&before_raw, &restore_path)?;
+        let mut active_profile = before.clone();
+        enrich_provider_snapshot_with_bridge(&mut active_profile, &bridge);
+        persist_active_profile(&profiles_path, &active_profile)?;
         client
             .batch_write_config(restore_edits(&target)?, before.version.clone())
             .map_err(|error| format!("Codex 拒绝了 Provider 恢复操作：{error}"))?;
@@ -794,6 +879,7 @@ async fn restore_provider_config(
         save_restore_point(&restore_path, &restore_point(&before))?;
         after.restore_available = true;
         enrich_provider_snapshot_with_bridge(&mut after, &bridge);
+        enrich_provider_snapshot_with_profiles(&mut after, &profiles_path)?;
         Ok(after)
     })
     .await
@@ -944,6 +1030,7 @@ pub fn run() {
                 pricing_config_path,
                 cost_scan: Arc::new(Mutex::new(())),
                 trace_scan: Arc::new(Mutex::new(TraceIndexCache::default())),
+                provider_profiles_path: app_data_dir.join("provider-profiles.json"),
                 provider_restore_path: app_data_dir.join("provider-restore.json"),
                 settings_restore_path: app_data_dir.join("settings-restore.json"),
             });
@@ -1005,6 +1092,7 @@ pub fn run() {
             get_provider_config,
             get_chat_bridge_status,
             test_provider_connection,
+            save_provider_profile,
             apply_provider_config,
             clear_provider_credential,
             restore_provider_config,

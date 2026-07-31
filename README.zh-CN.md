@@ -47,9 +47,9 @@ Codex X-Ray 是 Codex 的用量与执行分析工具。它展示额度和 Token�
 
 [![Codex X-Ray 用量概览](docs/assets/usage-overview.zh-CN.png)](docs/assets/usage-overview.zh-CN.png)
 
-### Provider 配置
+### 模型接入
 
-选择原生 Responses Provider，配置模型与接口地址，并把 API Key 保存在操作系统凭据库。
+接入原生 Responses 或 Chat Completions 模型服务，保存多套方案并快速切换。API Key 统一保存在 X-Ray 的用户专属凭据目录。
 
 [![Codex X-Ray Provider 配置](docs/assets/provider-console.zh-CN.png)](docs/assets/provider-console.zh-CN.png)
 
@@ -83,27 +83,29 @@ Codex X-Ray 是 Codex 的用量与执行分析工具。它展示额度和 Token�
 
 按项目、对话和 Turn 浏览 Session，还原从用户输入、LLM 返回，到 CLI/MCP/Skill 调用、工具结果、上下文变化、Token 结算和回合结束的完整过程。
 
-### Provider 与 Codex 配置
+### 模型接入与 Codex 配置
 
-切换原生 Responses Provider 或 OpenAI Chat 兼容 Provider，安全管理凭据，并通过 GUI 修改常用 Codex 设置。每次修改都会展示准确差异并保留可恢复的上一状态。
+保存多套模型接入方案，每套独立记录模型、接口、协议和凭据，并可一键切换。原生 Responses 服务由 Codex 直连；OpenAI Chat 兼容服务通过本机兼容桥接入。常用 Codex 设置也可在 GUI 中修改，启用方案时会保留可恢复的上一状态。
 
 ### 桌面工具
 
 支持中英文、亮暗主题、系统托盘、手动更新提示和版本检测，并可快速打开 Codex 配置、Session、Skills、Plugins 与 X-Ray SQLite 索引目录。
 
-## Chat Provider 如何接入 Codex
+## Chat 模型服务如何接入 Codex
 
-Codex 不会读取厂商的 Chat Completions 地址。它从 `~/.codex/config.toml` 读取一个普通的自定义 Provider；这个 Provider 的 `base_url` 指向 X-Ray 本机兼容桥，`wire_api` 仍然是 `responses`。
+Codex 不会读取厂商的 Chat Completions 地址。它从 `~/.codex/config.toml` 读取一个普通的自定义接入配置；其中 `base_url` 指向 X-Ray 本机兼容桥，`wire_api` 仍然是 `responses`。
 
 [![Codex 怎样读取 Chat Provider](docs/assets/provider-flow.png)](docs/assets/provider-flow.png)
 
-API Key 保存在操作系统凭据库，不写入 `config.toml`。Codex 需要 Bearer Token 时，通过 Provider 官方支持的 `auth.command` 调用 X-Ray 凭据助手。
+API Key 保存在仅当前用户可读的 X-Ray 凭据目录，不把明文写入 `config.toml`。Codex 需要 Bearer Token 时，通过 Provider 官方支持的 `auth.command` 调用 X-Ray 凭据助手。
 
 ### 一轮工具调用如何执行
 
 [![一次工具调用如何穿过 Responses 与 Chat](docs/assets/chat-bridge-flow.png)](docs/assets/chat-bridge-flow.png)
 
 模型只决定调用哪个工具以及参数。Codex 负责审批、执行、收集结果并发起下一次模型调用。兼容桥不会执行工具，只负责转换两种协议的请求字段和流式事件。
+
+Chat 兼容桥目前会转换系统与对话消息、流式文本、函数工具、并行工具调用和 Token 用量。Codex 内置 Web Search、服务端压缩与加密 Reasoning 不会发送给 Chat 上游。
 
 ## 数据如何流动
 
@@ -123,7 +125,7 @@ $CODEX_HOME/sessions ──只读 JSONL 事件─────────┘
 - 不读取 `auth.json`，不上传本地分析数据。原生 Responses Provider 由 Codex 直连；只有用户在控制台明确选择的 Chat Completions Provider 会经过 X-Ray 本机兼容桥。
 - 执行详情会按需从原始 Session 显示用户消息、助手消息和可读摘要；这些正文不写入 SQLite 索引。
 - SQLite 只保存用量、结构化阶段、来源行号，以及限长且脱敏的命令、参数和结果元数据；不保存完整工具输出、完整补丁或读取到的文件内容。
-- Provider Key 可保存到 macOS 钥匙串、Windows 凭据管理器或 Linux Secret Service。Codex 通过官方命令式认证按需读取；Key 不写入 `config.toml`、SQLite、日志或进程参数。本机 Chat 桥只转发当前 Provider 的 Key，并忽略无关的入站认证信息。仍可选择环境变量认证。
+- API Key 统一保存到 `~/.codex/codex-xray/credentials/` 下的用户专属凭据文件。Codex 通过官方命令式认证按需读取；Key 不写入 `config.toml`、SQLite、日志或进程参数。本机 Chat 桥只转发当前接入配置的 Key，并忽略无关的入站认证信息。仍可选择环境变量认证。
 - 配置修改必须先查看差异并再次确认，同时保留可恢复的上一状态。
 
 更完整的字段来源、计算公式和边界见[中文数据说明](docs/data-sources.zh-CN.md)。安全问题请阅读 [SECURITY.md](SECURITY.md)。

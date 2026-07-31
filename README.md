@@ -47,9 +47,9 @@ Official quota and local Session usage remain separate, with input, cache, outpu
 
 [![Codex X-Ray usage overview](docs/assets/usage-overview.en.png)](docs/assets/usage-overview.en.png)
 
-### Provider configuration
+### Model access
 
-Choose a native Responses provider, configure its model and endpoint, and keep the API key in the operating system credential store.
+Connect native Responses or Chat Completions model services, save multiple profiles, and switch between them. API keys stay in X-Ray's user-only local credential directory.
 
 [![Codex X-Ray provider configuration](docs/assets/provider-console.en.png)](docs/assets/provider-console.en.png)
 
@@ -79,7 +79,7 @@ Browse Sessions by project, conversation, and turn, then reconstruct each turn f
 
 ### Providers and Codex configuration
 
-Switch between native Responses providers and OpenAI-compatible Chat providers, manage credentials safely, and edit common Codex settings from a GUI. Every configuration change shows an exact diff and keeps a recoverable previous state.
+Save multiple provider profiles with separate models, endpoints, protocols, and credentials, then switch among them with one click. Native Responses providers connect directly; OpenAI-compatible Chat providers use the local compatibility bridge. Common Codex settings are also available in the GUI, and every active-provider change keeps a recoverable previous state.
 
 ### Desktop tools
 
@@ -91,13 +91,15 @@ Codex never reads the upstream Chat Completions URL. It reads a normal custom Pr
 
 [![How Codex reads a Chat provider](docs/assets/provider-flow.png)](docs/assets/provider-flow.png)
 
-The API key is stored in the operating system credential store rather than `config.toml`. When Codex needs a Bearer token, the Provider's official `auth.command` invokes X-Ray's credential helper.
+The API key is stored in X-Ray's user-only credential directory and is never written to `config.toml`. When Codex needs a Bearer token, the Provider's official `auth.command` invokes X-Ray's credential helper.
 
 ### One tool-calling turn
 
 [![One tool call across Responses and Chat](docs/assets/chat-bridge-flow.png)](docs/assets/chat-bridge-flow.png)
 
 The model only chooses a tool and its arguments. Codex performs approval and execution, captures the result, and starts the next model call. The bridge never executes tools; it only translates request fields and streaming events between the two protocols.
+
+The Chat bridge currently translates system and conversation messages, streaming text, function tools, parallel tool calls, and token usage. Codex-native web search, server-side compaction, and encrypted reasoning are not forwarded to the Chat upstream.
 
 ## Data flow
 
@@ -117,7 +119,7 @@ $CODEX_HOME/sessions ──read-only JSONL events──────────�
 - Codex X-Ray does not read `auth.json` or upload local analysis. Native Responses providers connect directly; only a Chat Completions provider explicitly selected in the Console is routed through the local X-Ray bridge.
 - Execution details can display user messages, assistant messages, and readable summaries from the original Session on demand; message bodies are not written to the SQLite index.
 - SQLite stores usage, structured phases, source line references, and bounded/redacted command, argument, and result metadata. It does not store complete tool output, full patches, or files read by Codex.
-- Provider keys can be stored in macOS Keychain, Windows Credential Manager, or Linux Secret Service. Codex reads them on demand through its official command-backed provider authentication; keys are never written to `config.toml`, SQLite, logs, or process arguments. The local Chat bridge forwards only the selected provider key and ignores unrelated inbound authorization. Environment-variable authentication remains available.
+- Provider keys are stored in a user-only credential file under `~/.codex/codex-xray/credentials/`. Codex reads them on demand through its official command-backed provider authentication; keys are never written to `config.toml`, SQLite, logs, or process arguments. The local Chat bridge forwards only the selected provider key and ignores unrelated inbound authorization. Environment-variable authentication remains available.
 - Configuration changes require a visible diff and explicit confirmation, with a recoverable previous state.
 
 See the [English data source guide](docs/data-sources.en.md) for field sources, formulas, and limitations. See [SECURITY.md](SECURITY.md) for vulnerability reporting.

@@ -1,13 +1,13 @@
 use std::collections::{BTreeMap, HashSet};
 use std::env;
-use std::fs;
-use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::fs::{self, File};
+use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -196,6 +196,28 @@ struct RawThreadMetadata {
     path: Option<String>,
     created_at: i64,
     updated_at: i64,
+    parent_thread_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawSessionIndexEntry {
+    id: String,
+    thread_name: Option<String>,
+    updated_at: Option<String>,
+}
+
+#[derive(Debug)]
+struct LocalSessionIndexEntry {
+    name: Option<String>,
+    updated_at: Option<i64>,
+}
+
+#[derive(Debug)]
+struct LocalSessionMetadata {
+    id: String,
+    cwd: String,
+    source: String,
+    created_at: i64,
     parent_thread_id: Option<String>,
 }
 
@@ -437,6 +459,7 @@ impl AppServerClient {
             }
 
             if !threads.is_empty() || !use_state_db_only {
+                supplement_thread_metadata_from_local_sessions(&mut threads);
                 if !use_state_db_only {
                     self.last_thread_metadata_scan = Some(Instant::now());
                 }
@@ -657,6 +680,219 @@ fn normalize_thread_status(value: &Value) -> Option<String> {
         "idle" | "notLoaded" => None,
         _ => None,
     }
+}
+
+fn supplement_thread_metadata_from_local_sessions(threads: &mut Vec<ThreadMetadata>) {
+    for home in codex_homes() {
+        let _ = supplement_thread_metadata_from_home(threads, &home);
+    }
+    threads.sort_by(|left, right| {
+        right
+            .updated_at
+            .cmp(&left.updated_at)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+}
+
+fn supplement_thread_metadata_from_home(
+    threads: &mut Vec<ThreadMetadata>,
+    home: &Path,
+) -> io::Result<usize> {
+    let index = read_local_session_index(&home.join("session_index.jsonl"))?;
+    let mut known = threads
+        .iter()
+        .enumerate()
+        .map(|(index, thread)| (thread.id.clone(), index))
+        .collect::<std::collections::HashMap<_, _>>();
+
+    for thread in threads.iter_mut() {
+        let Some(local) = index.get(&thread.id) else {
+            continue;
+        };
+        if thread.name.is_none() {
+            thread.name = local.name.clone();
+        }
+        if let Some(updated_at) = local.updated_at {
+            thread.updated_at = thread.updated_at.max(updated_at);
+        }
+    }
+
+    let mut paths = Vec::new();
+    collect_session_paths(&home.join("sessions"), &mut paths)?;
+    let mut added = 0;
+    for path in paths {
+        if let Some(session_id) = session_id_from_path(&path)
+            && let Some(existing) = known.get(session_id).copied()
+        {
+            if threads[existing].path.is_none() {
+                threads[existing].path = Some(path.to_string_lossy().to_string());
+            }
+            continue;
+        }
+        let Some(local) = read_local_session_metadata(&path)? else {
+            continue;
+        };
+        if !matches!(local.source.as_str(), "cli" | "vscode") {
+            continue;
+        }
+        if let Some(existing) = known.get(&local.id).copied() {
+            if threads[existing].path.is_none() {
+                threads[existing].path = Some(path.to_string_lossy().to_string());
+            }
+            continue;
+        }
+
+        let indexed = index.get(&local.id);
+        let modified_at = fs::metadata(&path)
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .and_then(|modified| modified.duration_since(SystemTime::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_secs() as i64);
+        let updated_at = indexed
+            .and_then(|entry| entry.updated_at)
+            .into_iter()
+            .chain(modified_at)
+            .max()
+            .unwrap_or(local.created_at);
+        let position = threads.len();
+        threads.push(ThreadMetadata {
+            id: local.id.clone(),
+            name: indexed.and_then(|entry| entry.name.clone()),
+            cwd: local.cwd,
+            status: None,
+            path: Some(path.to_string_lossy().to_string()),
+            created_at: local.created_at,
+            updated_at,
+            parent_thread_id: local.parent_thread_id,
+        });
+        known.insert(local.id, position);
+        added += 1;
+    }
+    Ok(added)
+}
+
+fn codex_homes() -> Vec<PathBuf> {
+    if let Some(configured) = env::var_os("CODEX_HOME") {
+        let homes = configured
+            .to_string_lossy()
+            .split(',')
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .collect::<Vec<_>>();
+        if !homes.is_empty() {
+            return homes;
+        }
+    }
+    env::var_os("HOME")
+        .map(|home| vec![PathBuf::from(home).join(".codex")])
+        .unwrap_or_default()
+}
+
+fn read_local_session_index(
+    path: &Path,
+) -> io::Result<std::collections::HashMap<String, LocalSessionIndexEntry>> {
+    if !path.is_file() {
+        return Ok(std::collections::HashMap::new());
+    }
+    let mut output = std::collections::HashMap::new();
+    for line in BufReader::new(File::open(path)?)
+        .lines()
+        .map_while(Result::ok)
+    {
+        let Ok(entry) = serde_json::from_str::<RawSessionIndexEntry>(&line) else {
+            continue;
+        };
+        let name = entry
+            .thread_name
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty());
+        let updated_at = entry
+            .updated_at
+            .as_deref()
+            .and_then(|timestamp| chrono::DateTime::parse_from_rfc3339(timestamp).ok())
+            .map(|timestamp| timestamp.timestamp());
+        output.insert(entry.id, LocalSessionIndexEntry { name, updated_at });
+    }
+    Ok(output)
+}
+
+fn collect_session_paths(directory: &Path, output: &mut Vec<PathBuf>) -> io::Result<()> {
+    if !directory.is_dir() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        let path = entry.path();
+        if entry.file_type()?.is_dir() {
+            collect_session_paths(&path, output)?;
+        } else if path.extension().and_then(|extension| extension.to_str()) == Some("jsonl") {
+            output.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn session_id_from_path(path: &Path) -> Option<&str> {
+    let stem = path.file_stem()?.to_str()?;
+    let session_id = stem.get(stem.len().checked_sub(36)?..)?;
+    let bytes = session_id.as_bytes();
+    if bytes.len() == 36
+        && [8, 13, 18, 23]
+            .into_iter()
+            .all(|position| bytes[position] == b'-')
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| [8, 13, 18, 23].contains(&index) || byte.is_ascii_hexdigit())
+    {
+        Some(session_id)
+    } else {
+        None
+    }
+}
+
+fn read_local_session_metadata(path: &Path) -> io::Result<Option<LocalSessionMetadata>> {
+    let reader = BufReader::new(File::open(path)?);
+    for line in reader.lines().take(8).map_while(Result::ok) {
+        let Ok(value) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if value.get("type").and_then(Value::as_str) != Some("session_meta") {
+            continue;
+        }
+        let Some(payload) = value.get("payload") else {
+            return Ok(None);
+        };
+        let Some(id) = payload.get("id").and_then(Value::as_str) else {
+            return Ok(None);
+        };
+        let Some(cwd) = payload.get("cwd").and_then(Value::as_str) else {
+            return Ok(None);
+        };
+        let source = payload
+            .get("source")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string();
+        let created_at = value
+            .get("timestamp")
+            .and_then(Value::as_str)
+            .and_then(|timestamp| chrono::DateTime::parse_from_rfc3339(timestamp).ok())
+            .map(|timestamp| timestamp.timestamp())
+            .unwrap_or_default();
+        return Ok(Some(LocalSessionMetadata {
+            id: id.to_string(),
+            cwd: cwd.to_string(),
+            source,
+            created_at,
+            parent_thread_id: payload
+                .get("parent_thread_id")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned),
+        }));
+    }
+    Ok(None)
 }
 
 impl Drop for AppServerClient {
@@ -922,5 +1158,70 @@ mod tests {
             Some("waiting_input")
         );
         assert_eq!(normalize_thread_status(&json!({ "type": "idle" })), None);
+    }
+
+    #[test]
+    fn supplements_threads_missing_from_app_server_with_active_session_files() {
+        const MISSING_ID: &str = "019fb337-e786-7800-bd0d-fbcd46e0f003";
+        let home = std::env::temp_dir().join(format!(
+            "codex-xray-thread-catalog-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let sessions = home.join("sessions/2026/07/30");
+        fs::create_dir_all(&sessions).expect("create sessions");
+        fs::write(
+            home.join("session_index.jsonl"),
+            format!(
+                "{{\"id\":\"existing\",\"thread_name\":\"Existing title\",\"updated_at\":\"2026-07-30T12:00:00Z\"}}\n\
+                 {{\"id\":\"{MISSING_ID}\",\"thread_name\":\"测试下\",\"updated_at\":\"2026-07-30T13:30:22Z\"}}\n"
+            ),
+        )
+        .expect("write session index");
+        let missing_path = sessions.join(format!("rollout-2026-07-30T21-30-13-{MISSING_ID}.jsonl"));
+        fs::write(
+            &missing_path,
+            format!(
+                "{{\"timestamp\":\"2026-07-30T13:30:13Z\",\"type\":\"session_meta\",\
+                 \"payload\":{{\"id\":\"{MISSING_ID}\",\"cwd\":\"/Users/test/Documents/副业\",\
+                 \"source\":\"vscode\",\"parent_thread_id\":null}}}}\n"
+            ),
+        )
+        .expect("write missing session");
+        assert_eq!(session_id_from_path(&missing_path), Some(MISSING_ID));
+
+        let mut threads = vec![ThreadMetadata {
+            id: "existing".to_string(),
+            name: None,
+            cwd: "/tmp/existing".to_string(),
+            status: None,
+            path: None,
+            created_at: 1,
+            updated_at: 1,
+            parent_thread_id: None,
+        }];
+        let added =
+            supplement_thread_metadata_from_home(&mut threads, &home).expect("supplement catalog");
+
+        assert_eq!(added, 1);
+        assert_eq!(threads.len(), 2);
+        assert_eq!(threads[0].name.as_deref(), Some("Existing title"));
+        let missing = threads
+            .iter()
+            .find(|thread| thread.id == MISSING_ID)
+            .expect("missing thread was added");
+        assert_eq!(missing.name.as_deref(), Some("测试下"));
+        assert_eq!(missing.cwd, "/Users/test/Documents/副业");
+        assert!(
+            missing
+                .path
+                .as_deref()
+                .is_some_and(|path| path.ends_with(&format!("{MISSING_ID}.jsonl")))
+        );
+
+        fs::remove_dir_all(home).expect("cleanup");
     }
 }

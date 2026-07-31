@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import {
   ArrowDown,
   ArrowUp,
+  Cable,
   ChartNoAxesCombined,
   ChevronRight,
   CircleAlert,
@@ -65,7 +66,7 @@ type UsageReport = "overview" | "daily" | "monthly" | "projects" | "models";
 type HistoryDisplay = "table" | "trend";
 type HistoryOrder = "desc" | "asc";
 type UsageRefreshMode = "initial" | "background" | "manual";
-type ActiveView = "usage" | "trace" | "provider";
+type ActiveView = "usage" | "trace" | "access" | "console";
 
 const USAGE_BOOT_CACHE_KEY = "codex-xray.usage-snapshot.v1";
 const COST_BOOT_CACHE_KEY = "codex-xray.cost-snapshot.v2";
@@ -1974,15 +1975,26 @@ function App() {
             {t("nav.trace")}
           </button>
           <button
-            className={`nav-item${activeView === "provider" ? " active" : ""}`}
-            aria-current={activeView === "provider" ? "page" : undefined}
+            className={`nav-item${activeView === "access" ? " active" : ""}`}
+            aria-current={activeView === "access" ? "page" : undefined}
             onClick={() => {
               setConsoleMounted(true);
-              setActiveView("provider");
+              setActiveView("access");
+            }}
+          >
+            <Cable className="nav-icon" aria-hidden="true" />
+            {t("nav.access")}
+          </button>
+          <button
+            className={`nav-item${activeView === "console" ? " active" : ""}`}
+            aria-current={activeView === "console" ? "page" : undefined}
+            onClick={() => {
+              setConsoleMounted(true);
+              setActiveView("console");
             }}
           >
             <SlidersHorizontal className="nav-icon" aria-hidden="true" />
-            {t("nav.provider")}
+            {t("nav.console")}
           </button>
         </nav>
 
@@ -2038,7 +2050,8 @@ function App() {
         <ProviderView
           locale={locale}
           onOpenUrl={openExternal}
-          hidden={activeView !== "provider"}
+          surface={activeView === "console" ? "console" : "access"}
+          hidden={activeView !== "access" && activeView !== "console"}
         />
       )}
       {activeView === "trace" && (

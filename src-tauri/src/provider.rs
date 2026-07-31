@@ -1,20 +1,24 @@
+use std::collections::BTreeMap;
 use std::env;
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Instant;
 
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
 use chrono::Utc;
-use keyring::{Entry, Error as KeyringError};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use url::Url;
 
 use crate::chat_bridge::{ChatBridgeState, is_provider_bridge_url, provider_base_url};
 
-const CREDENTIAL_SERVICE: &str = "app.codex-xray.provider";
 const CREDENTIAL_HELPER_ARG: &str = "--codex-xray-credential";
+const FILE_CREDENTIAL_HELPER_ARG: &str = "--codex-xray-file-credential";
+const PROFILE_FILE_VERSION: u32 = 1;
 
 const BUILTIN_PROVIDERS: &[(&str, &str, Option<&str>)] = &[
     ("openai", "OpenAI", None),
@@ -32,6 +36,7 @@ pub struct ProviderDefinition {
     pub env_available: bool,
     pub credential_source: String,
     pub credential_available: bool,
+    pub credential_path: Option<String>,
     pub auth_command: Option<String>,
     pub auth_args: Vec<String>,
     pub wire_api: String,
@@ -51,8 +56,43 @@ pub struct ProviderSnapshot {
     pub active_model: Option<String>,
     pub models: Vec<ModelOption>,
     pub providers: Vec<ProviderDefinition>,
+    pub profiles: Vec<ProviderProfile>,
     pub restore_available: bool,
     pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProviderProfile {
+    pub id: String,
+    pub name: String,
+    pub provider_id: String,
+    pub provider_name: String,
+    pub model: String,
+    pub base_url: Option<String>,
+    pub env_key: Option<String>,
+    pub credential_mode: String,
+    pub credential_available: bool,
+    #[serde(default)]
+    pub credential_path: Option<String>,
+    pub protocol: String,
+    pub context_window: u64,
+    pub builtin: bool,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProviderProfileFile {
+    version: u32,
+    profiles: BTreeMap<String, ProviderProfile>,
+}
+
+impl Default for ProviderProfileFile {
+    fn default() -> Self {
+        Self {
+            version: PROFILE_FILE_VERSION,
+            profiles: BTreeMap::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -67,6 +107,7 @@ pub struct ModelOption {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderApplyRequest {
+    pub profile_name: Option<String>,
     pub provider_id: String,
     pub model: String,
     pub name: Option<String>,
@@ -95,6 +136,14 @@ pub struct ProviderTestResult {
     pub latency_ms: u128,
     pub http_status: Option<u16>,
     pub message: String,
+    pub capabilities: Vec<ProviderCapability>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderCapability {
+    pub capability: String,
+    pub status: String,
+    pub value: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -126,46 +175,82 @@ fn is_builtin(id: &str) -> bool {
         .any(|(builtin_id, _, _)| *builtin_id == id)
 }
 
-fn credential_entry(provider_id: &str) -> Result<Entry, String> {
-    Entry::new(CREDENTIAL_SERVICE, provider_id)
-        .map_err(|error| format!("无法访问系统凭据存储：{error}"))
-}
-
-fn keyring_error_message(error: KeyringError) -> String {
-    match error {
-        KeyringError::NoEntry => "系统凭据存储中没有这个 Provider 的 API Key。".to_string(),
-        other => format!("无法读取系统凭据存储：{other}"),
-    }
-}
-
-pub(crate) fn read_credential(provider_id: &str) -> Result<String, String> {
-    credential_entry(provider_id)?
-        .get_password()
-        .map_err(keyring_error_message)
-        .and_then(validate_api_key)
-}
-
 fn default_protocol() -> String {
     "responses".to_string()
 }
 
-fn credential_exists(provider_id: &str) -> bool {
-    read_credential(provider_id).is_ok()
-}
-
-fn save_credential(provider_id: &str, api_key: &str) -> Result<(), String> {
-    let api_key = validate_api_key(api_key.to_string())?;
-    credential_entry(provider_id)?
-        .set_password(&api_key)
-        .map_err(|error| format!("无法将 API Key 保存到系统凭据存储：{error}"))
-}
-
-pub fn delete_credential(provider_id: &str) -> Result<(), String> {
+fn credential_file_path(provider_id: &str) -> Result<PathBuf, String> {
     let provider_id = validate_identifier(provider_id, "Provider ID")?;
-    match credential_entry(&provider_id)?.delete_credential() {
-        Ok(()) | Err(KeyringError::NoEntry) => Ok(()),
-        Err(error) => Err(format!("无法从系统凭据存储删除 API Key：{error}")),
+    Ok(codex_home()
+        .join("codex-xray")
+        .join("credentials")
+        .join(format!("{provider_id}.key")))
+}
+
+fn credential_file_display_path(provider_id: &str) -> Option<String> {
+    credential_file_path(provider_id)
+        .ok()
+        .map(|path| path.to_string_lossy().into_owned())
+}
+
+pub(crate) fn read_file_credential(provider_id: &str) -> Result<String, String> {
+    let path = credential_file_path(provider_id)?;
+    let value = fs::read_to_string(&path)
+        .map_err(|error| format!("无法读取凭据文件 {}：{error}", path.display()))?;
+    validate_api_key(value)
+}
+
+fn file_credential_exists(provider_id: &str) -> bool {
+    credential_file_path(provider_id)
+        .ok()
+        .is_some_and(|path| path.is_file())
+}
+
+fn save_file_credential(provider_id: &str, api_key: &str) -> Result<(), String> {
+    let api_key = validate_api_key(api_key.to_string())?;
+    let path = credential_file_path(provider_id)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| "无法确定凭据文件目录。".to_string())?;
+    fs::create_dir_all(parent)
+        .map_err(|error| format!("无法创建凭据文件目录 {}：{error}", parent.display()))?;
+    #[cfg(unix)]
+    fs::set_permissions(parent, fs::Permissions::from_mode(0o700))
+        .map_err(|error| format!("无法限制凭据目录权限：{error}"))?;
+
+    let temporary = path.with_extension("key.tmp");
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options
+        .open(&temporary)
+        .map_err(|error| format!("无法创建临时凭据文件：{error}"))?;
+    file.write_all(api_key.as_bytes())
+        .and_then(|_| file.sync_all())
+        .map_err(|error| format!("无法写入凭据文件：{error}"))?;
+    fs::rename(&temporary, &path).map_err(|error| format!("无法保存凭据文件：{error}"))?;
+    #[cfg(unix)]
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+        .map_err(|error| format!("无法限制凭据文件权限：{error}"))?;
+    Ok(())
+}
+
+fn delete_file_credential(provider_id: &str) -> Result<(), String> {
+    let path = credential_file_path(provider_id)?;
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("无法删除凭据文件 {}：{error}", path.display())),
     }
+}
+
+pub fn delete_credential(provider_id: &str, mode: Option<&str>) -> Result<(), String> {
+    let provider_id = validate_identifier(provider_id, "Provider ID")?;
+    if mode != Some("file") {
+        return Err("当前只支持删除 X-Ray 本机保存的 API Key。".to_string());
+    }
+    delete_file_credential(&provider_id)
 }
 
 fn validate_api_key(value: String) -> Result<String, String> {
@@ -184,7 +269,10 @@ fn credential_helper_definition(provider_id: &str) -> Result<(String, Vec<String
         env::current_exe().map_err(|error| format!("无法定位 Codex X-Ray 可执行文件：{error}"))?;
     Ok((
         executable.to_string_lossy().into_owned(),
-        vec![CREDENTIAL_HELPER_ARG.to_string(), provider_id.to_string()],
+        vec![
+            FILE_CREDENTIAL_HELPER_ARG.to_string(),
+            provider_id.to_string(),
+        ],
     ))
 }
 
@@ -205,11 +293,12 @@ fn auth_definition(value: &Value) -> (Option<String>, Vec<String>) {
     (command, args)
 }
 
-fn is_xray_credential_helper(args: &[String], provider_id: &str) -> bool {
-    matches!(
-        args,
-        [helper, id] if helper == CREDENTIAL_HELPER_ARG && id == provider_id
-    )
+fn xray_credential_helper_mode(args: &[String], provider_id: &str) -> Option<&'static str> {
+    match args {
+        [helper, id] if helper == CREDENTIAL_HELPER_ARG && id == provider_id => Some("keychain"),
+        [helper, id] if helper == FILE_CREDENTIAL_HELPER_ARG && id == provider_id => Some("file"),
+        _ => None,
+    }
 }
 
 fn compatibility_for(base_url: Option<&str>, wire_api: &str) -> String {
@@ -230,9 +319,11 @@ fn definition_from_value(id: &str, value: &Value) -> ProviderDefinition {
         .as_deref()
         .is_some_and(|key| env::var_os(key).is_some());
     let (auth_command, auth_args) = auth_definition(value);
-    let keychain = auth_command.is_some() && is_xray_credential_helper(&auth_args, id);
-    let credential_source = if keychain {
-        "keychain"
+    let xray_credential_mode = auth_command
+        .as_ref()
+        .and_then(|_| xray_credential_helper_mode(&auth_args, id));
+    let credential_source = if let Some(mode) = xray_credential_mode {
+        mode
     } else if auth_command.is_some() {
         "command"
     } else if env_key.is_some() {
@@ -241,8 +332,10 @@ fn definition_from_value(id: &str, value: &Value) -> ProviderDefinition {
         "none"
     }
     .to_string();
-    let credential_available = if keychain {
-        credential_exists(id)
+    let credential_available = if xray_credential_mode == Some("keychain") {
+        false
+    } else if xray_credential_mode == Some("file") {
+        file_credential_exists(id)
     } else if auth_command.is_some() {
         true
     } else if env_key.is_some() {
@@ -260,6 +353,9 @@ fn definition_from_value(id: &str, value: &Value) -> ProviderDefinition {
         env_available,
         credential_source,
         credential_available,
+        credential_path: (xray_credential_mode == Some("file"))
+            .then(|| credential_file_display_path(id))
+            .flatten(),
         auth_command,
         auth_args,
         wire_api,
@@ -315,6 +411,7 @@ pub fn build_provider_snapshot(
                 env_available: true,
                 credential_source: "builtin".to_string(),
                 credential_available: true,
+                credential_path: None,
                 auth_command: None,
                 auth_args: Vec::new(),
                 wire_api: "responses".to_string(),
@@ -369,7 +466,9 @@ pub fn build_provider_snapshot(
             warnings.push(format!(
                 "当前 Provider 的{}凭据不可用。",
                 if active.credential_source == "keychain" {
-                    "系统钥匙串"
+                    "旧版"
+                } else if active.credential_source == "file" {
+                    "本机"
                 } else {
                     "环境变量"
                 }
@@ -389,6 +488,7 @@ pub fn build_provider_snapshot(
         active_model,
         models: Vec::new(),
         providers,
+        profiles: Vec::new(),
         restore_available: restore_path.is_file(),
         warnings,
     })
@@ -508,7 +608,7 @@ fn credential_mode(request: &ProviderApplyRequest) -> Result<&str, String> {
             "none"
         }
     });
-    if !["keychain", "environment", "none"].contains(&mode) {
+    if !["file", "environment", "none"].contains(&mode) {
         return Err("凭据方式不是 Codex X-Ray 支持的值。".to_string());
     }
     Ok(mode)
@@ -562,24 +662,29 @@ fn custom_definition(request: &ProviderApplyRequest) -> Result<ProviderDefinitio
     } else {
         None
     };
-    let (auth_command, auth_args) = if mode == "keychain" {
+    let (auth_command, auth_args) = if mode == "file" {
         let (command, args) = credential_helper_definition(&id)?;
         (Some(command), args)
     } else {
         (None, Vec::new())
     };
     let credential_available = match mode {
-        "keychain" => {
+        "file" => {
             request
                 .api_key
                 .as_deref()
                 .is_some_and(|value| validate_api_key(value.to_string()).is_ok())
-                || credential_exists(&id)
+                || file_credential_exists(&id)
         }
         "environment" => env_key
             .as_deref()
             .is_some_and(|key| env::var_os(key).is_some()),
         _ => true,
+    };
+    let credential_path = if mode == "file" {
+        credential_file_display_path(&id)
+    } else {
+        None
     };
     Ok(ProviderDefinition {
         id,
@@ -591,6 +696,7 @@ fn custom_definition(request: &ProviderApplyRequest) -> Result<ProviderDefinitio
         env_key,
         credential_source: mode.to_string(),
         credential_available,
+        credential_path,
         auth_command,
         auth_args,
         wire_api: "responses".to_string(),
@@ -660,6 +766,261 @@ pub fn build_apply_edits(
     Ok((edits, definition))
 }
 
+fn validate_profile_name(value: Option<&str>, fallback: &str) -> Result<String, String> {
+    let value = value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(fallback);
+    if value.len() > 96 || value.contains(['\r', '\n', '\0']) {
+        return Err("方案名称过长或包含控制字符。".to_string());
+    }
+    Ok(value.to_string())
+}
+
+fn load_profile_file(path: &Path) -> Result<ProviderProfileFile, String> {
+    if !path.is_file() {
+        return Ok(ProviderProfileFile::default());
+    }
+    let content = fs::read(path).map_err(|error| format!("无法读取 Provider 方案：{error}"))?;
+    let file = serde_json::from_slice::<ProviderProfileFile>(&content)
+        .map_err(|error| format!("Provider 方案无法解析：{error}"))?;
+    if file.version != PROFILE_FILE_VERSION {
+        return Err(format!("Provider 方案版本 {} 不受支持。", file.version));
+    }
+    Ok(file)
+}
+
+fn save_profile_file(path: &Path, file: &ProviderProfileFile) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("无法创建 Provider 方案目录：{error}"))?;
+    }
+    let content = serde_json::to_vec_pretty(file)
+        .map_err(|error| format!("无法序列化 Provider 方案：{error}"))?;
+    let temporary = path.with_extension("tmp");
+    fs::write(&temporary, content)
+        .and_then(|_| fs::rename(&temporary, path))
+        .map_err(|error| format!("无法保存 Provider 方案：{error}"))
+}
+
+fn request_profile(request: &ProviderApplyRequest) -> Result<ProviderProfile, String> {
+    let provider_id = validate_identifier(&request.provider_id, "Provider ID")?;
+    let model = validate_model(&request.model)?;
+    let builtin = is_builtin(&provider_id);
+    let definition = if builtin {
+        None
+    } else {
+        Some(custom_definition(request)?)
+    };
+    let provider_name = definition
+        .as_ref()
+        .map(|definition| definition.name.clone())
+        .or_else(|| {
+            BUILTIN_PROVIDERS
+                .iter()
+                .find(|(id, _, _)| *id == provider_id)
+                .map(|(_, name, _)| (*name).to_string())
+        })
+        .unwrap_or_else(|| provider_id.clone());
+    let name = validate_profile_name(request.profile_name.as_deref(), &provider_name)?;
+    let credential_mode = if builtin {
+        "builtin".to_string()
+    } else {
+        credential_mode(request)?.to_string()
+    };
+    let credential_available = match credential_mode.as_str() {
+        "builtin" | "none" => true,
+        "keychain" => false,
+        "file" => {
+            request
+                .api_key
+                .as_deref()
+                .is_some_and(|value| validate_api_key(value.to_string()).is_ok())
+                || file_credential_exists(&provider_id)
+        }
+        "environment" => request
+            .env_key
+            .as_deref()
+            .is_some_and(|key| env::var_os(key).is_some()),
+        _ => false,
+    };
+    let credential_path = if credential_mode == "file" {
+        credential_file_display_path(&provider_id)
+    } else {
+        None
+    };
+    Ok(ProviderProfile {
+        id: provider_id.clone(),
+        name,
+        provider_id,
+        provider_name,
+        model,
+        base_url: if builtin {
+            None
+        } else {
+            request.base_url.clone()
+        },
+        env_key: if credential_mode == "environment" {
+            request.env_key.clone()
+        } else {
+            None
+        },
+        credential_mode,
+        credential_available,
+        credential_path,
+        protocol: if builtin {
+            "responses".to_string()
+        } else {
+            provider_protocol(request)?.to_string()
+        },
+        context_window: if request.protocol == "chat_completions" {
+            validate_context_window(request.context_window)?
+        } else {
+            request.context_window
+        },
+        builtin,
+        updated_at: Utc::now().to_rfc3339(),
+    })
+}
+
+fn snapshot_profile(
+    snapshot: &ProviderSnapshot,
+    previous: Option<&ProviderProfile>,
+) -> Option<ProviderProfile> {
+    let model = snapshot.active_model.as_deref()?.trim();
+    if model.is_empty() {
+        return None;
+    }
+    let provider = snapshot
+        .providers
+        .iter()
+        .find(|provider| provider.id == snapshot.active_provider)?;
+    Some(ProviderProfile {
+        id: provider.id.clone(),
+        name: previous
+            .map(|profile| profile.name.clone())
+            .unwrap_or_else(|| provider.name.clone()),
+        provider_id: provider.id.clone(),
+        provider_name: provider.name.clone(),
+        model: model.to_string(),
+        base_url: provider.base_url.clone(),
+        env_key: provider.env_key.clone(),
+        credential_mode: provider.credential_source.clone(),
+        credential_available: provider.credential_available,
+        credential_path: provider.credential_path.clone(),
+        protocol: provider.protocol.clone(),
+        context_window: provider.context_window.unwrap_or(128_000),
+        builtin: provider.builtin,
+        updated_at: Utc::now().to_rfc3339(),
+    })
+}
+
+pub struct ProfileRollback {
+    profile_id: String,
+    previous: Option<ProviderProfile>,
+    changed: bool,
+}
+
+pub fn persist_request_profile(
+    path: &Path,
+    request: &ProviderApplyRequest,
+) -> Result<ProfileRollback, String> {
+    let profile = request_profile(request)?;
+    let mut file = load_profile_file(path)?;
+    let previous = file.profiles.insert(profile.id.clone(), profile.clone());
+    let changed = previous.as_ref() != Some(&profile);
+    if changed {
+        if let Err(error) = save_profile_file(path, &file) {
+            if let Some(previous) = previous.clone() {
+                file.profiles.insert(profile.id.clone(), previous);
+            } else {
+                file.profiles.remove(&profile.id);
+            }
+            return Err(error);
+        }
+    }
+    Ok(ProfileRollback {
+        profile_id: profile.id,
+        previous,
+        changed,
+    })
+}
+
+pub fn persist_active_profile(path: &Path, snapshot: &ProviderSnapshot) -> Result<(), String> {
+    let mut file = load_profile_file(path)?;
+    let previous = file.profiles.get(&snapshot.active_provider);
+    let Some(mut profile) = snapshot_profile(snapshot, previous) else {
+        return Ok(());
+    };
+    if let Some(previous) = previous
+        && previous.name == profile.name
+        && previous.provider_name == profile.provider_name
+        && previous.model == profile.model
+        && previous.base_url == profile.base_url
+        && previous.env_key == profile.env_key
+        && previous.credential_mode == profile.credential_mode
+        && previous.protocol == profile.protocol
+        && previous.context_window == profile.context_window
+        && previous.builtin == profile.builtin
+    {
+        return Ok(());
+    }
+    profile.updated_at = Utc::now().to_rfc3339();
+    file.profiles.insert(profile.id.clone(), profile);
+    save_profile_file(path, &file)
+}
+
+pub fn rollback_profile(path: &Path, update: ProfileRollback) {
+    if !update.changed {
+        return;
+    }
+    let Ok(mut file) = load_profile_file(path) else {
+        return;
+    };
+    if let Some(previous) = update.previous {
+        file.profiles.insert(update.profile_id, previous);
+    } else {
+        file.profiles.remove(&update.profile_id);
+    }
+    let _ = save_profile_file(path, &file);
+}
+
+pub fn enrich_provider_snapshot_with_profiles(
+    snapshot: &mut ProviderSnapshot,
+    path: &Path,
+) -> Result<(), String> {
+    let file = load_profile_file(path)?;
+    let mut profiles = file.profiles.into_values().collect::<Vec<_>>();
+    if !profiles
+        .iter()
+        .any(|profile| profile.provider_id == snapshot.active_provider)
+        && let Some(profile) = snapshot_profile(snapshot, None)
+    {
+        profiles.push(profile);
+    }
+    for profile in &mut profiles {
+        profile.credential_available = match profile.credential_mode.as_str() {
+            "builtin" | "none" => true,
+            "keychain" => false,
+            "file" => file_credential_exists(&profile.provider_id),
+            "environment" => profile
+                .env_key
+                .as_deref()
+                .is_some_and(|key| env::var_os(key).is_some()),
+            _ => false,
+        };
+    }
+    profiles.sort_by(|left, right| {
+        right
+            .provider_id
+            .eq(&snapshot.active_provider)
+            .cmp(&left.provider_id.eq(&snapshot.active_provider))
+            .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+    });
+    snapshot.profiles = profiles;
+    Ok(())
+}
+
 pub fn probe_provider(request: &ProviderApplyRequest) -> Result<ProviderTestResult, String> {
     let provider_id = validate_identifier(&request.provider_id, "Provider ID")?;
     let model = validate_model(&request.model)?;
@@ -692,6 +1053,7 @@ pub fn probe_provider(request: &ProviderApplyRequest) -> Result<ProviderTestResu
             env_available: true,
             credential_source: credential_mode(request)?.to_string(),
             credential_available: true,
+            credential_path: None,
             auth_command: None,
             auth_args: Vec::new(),
             wire_api: "responses".to_string(),
@@ -733,7 +1095,11 @@ pub fn probe_provider(request: &ProviderApplyRequest) -> Result<ProviderTestResu
     {
         Some(validate_api_key(api_key.clone())?)
     } else if definition.credential_source == "keychain" {
-        Some(read_credential(&provider_id)?)
+        return Err(
+            "这套配置仍使用旧钥匙串认证。请在“模型接入”中重新填写并保存 API Key。".to_string(),
+        );
+    } else if definition.credential_source == "file" {
+        Some(read_file_credential(&provider_id)?)
     } else {
         definition
             .env_key
@@ -828,6 +1194,7 @@ pub fn probe_provider(request: &ProviderApplyRequest) -> Result<ProviderTestResu
             } else {
                 truncate_message(&stderr)
             },
+            capabilities: provider_test_capabilities(&protocol, request.context_window, false),
         });
     }
     let (response, status) = stdout
@@ -860,7 +1227,102 @@ pub fn probe_provider(request: &ProviderApplyRequest) -> Result<ProviderTestResu
         latency_ms,
         http_status: Some(http_status),
         message,
+        capabilities: provider_test_capabilities(&protocol, request.context_window, success),
     })
+}
+
+pub fn provider_test_capabilities(
+    protocol: &str,
+    context_window: u64,
+    generation_verified: bool,
+) -> Vec<ProviderCapability> {
+    let generation_status = if generation_verified {
+        "verified"
+    } else {
+        "failed"
+    };
+    if protocol == "chat_completions" {
+        return vec![
+            ProviderCapability {
+                capability: "text_generation".to_string(),
+                status: generation_status.to_string(),
+                value: None,
+            },
+            ProviderCapability {
+                capability: "function_tools".to_string(),
+                status: "bridge_supported".to_string(),
+                value: None,
+            },
+            ProviderCapability {
+                capability: "image_input".to_string(),
+                status: "limited".to_string(),
+                value: None,
+            },
+            ProviderCapability {
+                capability: "builtin_tools".to_string(),
+                status: "limited".to_string(),
+                value: None,
+            },
+            ProviderCapability {
+                capability: "reasoning_compaction".to_string(),
+                status: "limited".to_string(),
+                value: None,
+            },
+            ProviderCapability {
+                capability: "context_window".to_string(),
+                status: "configured".to_string(),
+                value: Some(context_window.to_string()),
+            },
+        ];
+    }
+
+    vec![
+        ProviderCapability {
+            capability: "text_generation".to_string(),
+            status: generation_status.to_string(),
+            value: None,
+        },
+        ProviderCapability {
+            capability: "function_tools".to_string(),
+            status: "unverified".to_string(),
+            value: None,
+        },
+        ProviderCapability {
+            capability: "image_input".to_string(),
+            status: "unverified".to_string(),
+            value: None,
+        },
+        ProviderCapability {
+            capability: "builtin_tools".to_string(),
+            status: "unverified".to_string(),
+            value: None,
+        },
+        ProviderCapability {
+            capability: "reasoning_compaction".to_string(),
+            status: "unverified".to_string(),
+            value: None,
+        },
+        ProviderCapability {
+            capability: "context_window".to_string(),
+            status: "unverified".to_string(),
+            value: None,
+        },
+    ]
+}
+
+pub fn codex_catalog_capabilities(found: bool) -> Vec<ProviderCapability> {
+    vec![
+        ProviderCapability {
+            capability: "model_catalog".to_string(),
+            status: if found { "verified" } else { "failed" }.to_string(),
+            value: None,
+        },
+        ProviderCapability {
+            capability: "text_generation".to_string(),
+            status: "unverified".to_string(),
+            value: None,
+        },
+    ]
 }
 
 fn response_error_message(response: &str) -> String {
@@ -917,6 +1379,7 @@ pub fn restore_edits(point: &ProviderRestorePoint) -> Result<Vec<Value>, String>
 
 pub struct CredentialRollback {
     provider_id: String,
+    mode: String,
     previous: Option<String>,
     changed: bool,
 }
@@ -925,32 +1388,37 @@ pub fn persist_request_credential(
     request: &ProviderApplyRequest,
 ) -> Result<CredentialRollback, String> {
     let provider_id = validate_identifier(&request.provider_id, "Provider ID")?;
-    if is_builtin(&provider_id) || credential_mode(request)? != "keychain" {
+    let mode = credential_mode(request)?;
+    if is_builtin(&provider_id) || mode != "file" {
         return Ok(CredentialRollback {
             provider_id,
+            mode: mode.to_string(),
             previous: None,
             changed: false,
         });
     }
-    let previous = read_credential(&provider_id).ok();
     if let Some(api_key) = request
         .api_key
         .as_ref()
         .filter(|value| !value.trim().is_empty())
     {
-        save_credential(&provider_id, api_key)?;
+        let previous = read_file_credential(&provider_id).ok();
+        save_file_credential(&provider_id, api_key)?;
         return Ok(CredentialRollback {
             provider_id,
+            mode: mode.to_string(),
             previous,
             changed: true,
         });
     }
-    if previous.is_none() {
-        return Err("请先填写 API Key；保存后它只会进入系统凭据存储。".to_string());
+    let available = file_credential_exists(&provider_id);
+    if !available {
+        return Err("请先填写 API Key；保存后它不会写入 Codex 配置。".to_string());
     }
     Ok(CredentialRollback {
         provider_id,
-        previous,
+        mode: mode.to_string(),
+        previous: None,
         changed: false,
     })
 }
@@ -960,9 +1428,9 @@ pub fn rollback_credential(update: CredentialRollback) {
         return;
     }
     if let Some(previous) = update.previous {
-        let _ = save_credential(&update.provider_id, &previous);
-    } else {
-        let _ = delete_credential(&update.provider_id);
+        let _ = save_file_credential(&update.provider_id, &previous);
+    } else if update.mode == "file" {
+        let _ = delete_file_credential(&update.provider_id);
     }
 }
 
@@ -970,7 +1438,13 @@ pub fn credential_helper_exit_code() -> Option<i32> {
     let mut args = env::args_os();
     let _executable = args.next();
     let flag = args.next()?;
-    if flag != CREDENTIAL_HELPER_ARG {
+    if flag == CREDENTIAL_HELPER_ARG {
+        eprintln!(
+            "Codex X-Ray credential helper: keychain authentication was removed; save the API key again in Model access"
+        );
+        return Some(2);
+    }
+    if flag != FILE_CREDENTIAL_HELPER_ARG {
         return None;
     }
     let Some(provider_id) = args.next().and_then(|value| value.into_string().ok()) else {
@@ -981,9 +1455,9 @@ pub fn credential_helper_exit_code() -> Option<i32> {
         eprintln!("Codex X-Ray credential helper: unexpected arguments");
         return Some(2);
     }
-    match validate_identifier(&provider_id, "Provider ID")
-        .and_then(|provider_id| read_credential(&provider_id))
-    {
+    let credential = validate_identifier(&provider_id, "Provider ID")
+        .and_then(|provider_id| read_file_credential(&provider_id));
+    match credential {
         Ok(secret) => {
             if io::stdout()
                 .write_all(secret.as_bytes())
@@ -1027,6 +1501,7 @@ mod tests {
     #[test]
     fn rejects_glm_chat_completion_endpoint() {
         let request = ProviderApplyRequest {
+            profile_name: Some("GLM".to_string()),
             provider_id: "glm".to_string(),
             model: "glm-5.2".to_string(),
             name: Some("GLM".to_string()),
@@ -1045,6 +1520,7 @@ mod tests {
     #[test]
     fn accepts_qianfan_responses_for_glm() {
         let request = ProviderApplyRequest {
+            profile_name: Some("Qianfan GLM".to_string()),
             provider_id: "qianfan-glm".to_string(),
             model: "glm-5".to_string(),
             name: Some("Baidu Qianfan · GLM".to_string()),
@@ -1071,7 +1547,7 @@ mod tests {
             "https://dashscope.aliyuncs.com/compatible-mode/v1",
             "https://ark.cn-beijing.volces.com/api/v3",
             "https://api.minimaxi.com/v1",
-            "https://api.stepfun.com/v1",
+            "https://api.xiaomimimo.com/v1",
         ] {
             assert_eq!(
                 validate_base_url(base_url).expect("Responses endpoint"),
@@ -1083,6 +1559,7 @@ mod tests {
     #[test]
     fn builds_safe_responses_provider_edits() {
         let request = ProviderApplyRequest {
+            profile_name: Some("GLM Gateway".to_string()),
             provider_id: "glm-gateway".to_string(),
             model: "glm-5.2".to_string(),
             name: Some("GLM via Responses gateway".to_string()),
@@ -1104,35 +1581,65 @@ mod tests {
     }
 
     #[test]
-    fn writes_keychain_auth_without_serializing_api_key() {
+    fn writes_file_auth_without_serializing_api_key() {
         let request = ProviderApplyRequest {
-            provider_id: "dashscope".to_string(),
+            profile_name: Some("Qwen file".to_string()),
+            provider_id: "dashscope-file".to_string(),
             model: "qwen3-coder-plus".to_string(),
             name: Some("Alibaba Model Studio".to_string()),
             base_url: Some("https://dashscope.aliyuncs.com/compatible-mode/v1".to_string()),
             env_key: None,
-            credential_mode: Some("keychain".to_string()),
+            credential_mode: Some("file".to_string()),
             api_key: Some("test-secret-value".to_string()),
             protocol: "responses".to_string(),
             context_window: 128_000,
             expected_version: None,
         };
-        let (edits, definition) = build_apply_edits(&request).expect("keychain provider");
+        let (edits, definition) = build_apply_edits(&request).expect("file provider");
         let serialized = serde_json::to_string(&edits).expect("serialize edits");
         assert!(!serialized.contains("test-secret-value"));
-        assert!(serialized.contains(CREDENTIAL_HELPER_ARG));
-        assert!(definition.is_some_and(|provider| provider.credential_source == "keychain"));
+        assert!(serialized.contains(FILE_CREDENTIAL_HELPER_ARG));
+        assert!(definition.is_some_and(|provider| {
+            provider.credential_source == "file"
+                && provider
+                    .credential_path
+                    .is_some_and(|path| path.ends_with("dashscope-file.key"))
+        }));
+    }
+
+    #[test]
+    fn provider_profile_never_serializes_api_key() {
+        let request = ProviderApplyRequest {
+            profile_name: Some("Kimi Work".to_string()),
+            provider_id: "kimi-work".to_string(),
+            model: "kimi-k2.6".to_string(),
+            name: Some("Kimi".to_string()),
+            base_url: Some("https://api.moonshot.cn/v1".to_string()),
+            env_key: None,
+            credential_mode: Some("file".to_string()),
+            api_key: Some("test-secret-value".to_string()),
+            protocol: "chat_completions".to_string(),
+            context_window: 256_000,
+            expected_version: None,
+        };
+        let profile = request_profile(&request).expect("profile");
+        let serialized = serde_json::to_string(&profile).expect("serialize profile");
+        assert_eq!(profile.provider_id, "kimi-work");
+        assert_eq!(profile.protocol, "chat_completions");
+        assert!(!serialized.contains("test-secret-value"));
+        assert!(!serialized.contains("api_key"));
     }
 
     #[test]
     fn routes_chat_completions_through_local_bridge() {
         let request = ProviderApplyRequest {
+            profile_name: Some("DeepSeek".to_string()),
             provider_id: "deepseek-direct".to_string(),
             model: "deepseek-chat".to_string(),
             name: Some("DeepSeek Direct".to_string()),
             base_url: Some("https://api.deepseek.com".to_string()),
             env_key: None,
-            credential_mode: Some("keychain".to_string()),
+            credential_mode: Some("file".to_string()),
             api_key: Some("test-secret-value".to_string()),
             protocol: "chat_completions".to_string(),
             context_window: 128_000,
@@ -1143,5 +1650,49 @@ mod tests {
         assert!(serialized.contains("http://127.0.0.1:32198/v1/chat/deepseek-direct"));
         assert!(!serialized.contains("https://api.deepseek.com"));
         assert!(definition.is_some_and(|provider| provider.compatibility == "chat_bridge"));
+    }
+
+    #[test]
+    fn reports_chat_bridge_limits_without_claiming_the_probe_verified_them() {
+        let capabilities = provider_test_capabilities("chat_completions", 128_000, true);
+        let status = |name: &str| {
+            capabilities
+                .iter()
+                .find(|item| item.capability == name)
+                .map(|item| item.status.as_str())
+        };
+        assert_eq!(status("text_generation"), Some("verified"));
+        assert_eq!(status("function_tools"), Some("bridge_supported"));
+        assert_eq!(status("image_input"), Some("limited"));
+        assert_eq!(status("builtin_tools"), Some("limited"));
+        assert_eq!(status("reasoning_compaction"), Some("limited"));
+        assert_eq!(
+            capabilities
+                .iter()
+                .find(|item| item.capability == "context_window")
+                .and_then(|item| item.value.as_deref()),
+            Some("128000")
+        );
+    }
+
+    #[test]
+    fn leaves_native_responses_features_unverified_after_a_text_probe() {
+        let capabilities = provider_test_capabilities("responses", 128_000, true);
+        assert_eq!(
+            capabilities
+                .iter()
+                .find(|item| item.capability == "text_generation")
+                .map(|item| item.status.as_str()),
+            Some("verified")
+        );
+        assert!(
+            capabilities
+                .iter()
+                .filter(|item| {
+                    item.capability != "text_generation" && item.status == "unverified"
+                })
+                .count()
+                >= 5
+        );
     }
 }
