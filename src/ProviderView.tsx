@@ -12,6 +12,7 @@ import {
   ImageOff,
   KeyRound,
   ListChecks,
+  LoaderCircle,
   MessageSquareText,
   Plus,
   Power,
@@ -1718,13 +1719,19 @@ export default function ProviderView({
               </span>
               <div>
                 <button
+                  type="button"
                   className="secondary-action"
                   disabled={
                     !configurationComplete || loading || saving || testing
                   }
                   onClick={() => void saveProfile()}
+                  aria-busy={saving}
                 >
-                  <Save aria-hidden="true" />
+                  {saving ? (
+                    <LoaderCircle className="spinning" aria-hidden="true" />
+                  ) : (
+                    <Save aria-hidden="true" />
+                  )}
                   {saving
                     ? zh
                       ? "保存中…"
@@ -1734,13 +1741,19 @@ export default function ProviderView({
                       : "Save profile"}
                 </button>
                 <button
+                  type="button"
                   className="secondary-action"
                   disabled={
                     !configurationComplete || loading || saving || testing
                   }
                   onClick={() => void testConnection()}
+                  aria-busy={testing}
                 >
-                  <FlaskConical aria-hidden="true" />
+                  {testing ? (
+                    <LoaderCircle className="spinning" aria-hidden="true" />
+                  ) : (
+                    <FlaskConical aria-hidden="true" />
+                  )}
                   {testing
                     ? zh
                       ? "测试中…"
@@ -1750,6 +1763,7 @@ export default function ProviderView({
                       : "Test connection"}
                 </button>
                 <button
+                  type="button"
                   className="primary-action"
                   disabled={!canPreview || loading || saving || testing}
                   onClick={() => {

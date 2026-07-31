@@ -4,6 +4,14 @@ import App from "./App";
 import "./styles.css";
 import { applyTheme, readTheme } from "./theme";
 
+document.documentElement.dataset.platform = /Macintosh|Mac OS X/.test(
+  navigator.userAgent,
+)
+  ? "macos"
+  : /Windows/.test(navigator.userAgent)
+    ? "windows"
+    : "linux";
+
 applyTheme(readTheme());
 
 createRoot(document.getElementById("root")!).render(

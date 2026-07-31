@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -22,6 +23,24 @@ if (process.platform === "darwin" && !env.CI && !env.CARGO_TARGET_DIR) {
   const target = resolve(repositoryRoot, "src-tauri", "target.noindex");
   mkdirSync(target, { recursive: true });
   env.CARGO_TARGET_DIR = target;
+}
+
+// Local release builds can use the updater key generated for this repository
+// without copying the private key into the workspace.
+if (
+  !env.CI &&
+  !env.TAURI_SIGNING_PRIVATE_KEY &&
+  !env.TAURI_SIGNING_PRIVATE_KEY_PATH
+) {
+  const updaterKey = resolve(
+    homedir(),
+    ".tauri",
+    "codex-xray-updater.key",
+  );
+  if (existsSync(updaterKey)) {
+    env.TAURI_SIGNING_PRIVATE_KEY = readFileSync(updaterKey, "utf8").trim();
+    env.TAURI_SIGNING_PRIVATE_KEY_PASSWORD ??= "";
+  }
 }
 
 const result = spawnSync(process.execPath, [cli, ...process.argv.slice(2)], {

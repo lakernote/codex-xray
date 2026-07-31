@@ -35,9 +35,9 @@ Codex X-Ray 是 Codex 的用量与执行分析工具。它展示额度和 Token�
 | Ubuntu / Debian · 64 位 | `_amd64.deb` |
 | Fedora / RHEL · 64 位 | `.x86_64.rpm` |
 
-当前预览版尚未使用可信发布者证书签名或公证，操作系统可能显示“未知开发者”警告。使用前需要已经安装并登录 Codex。“Source code”压缩包是源码快照，不是安装包。
+当前预览版尚未使用可信发布者证书签名或公证，首次安装时操作系统可能显示“未知开发者”警告。使用前需要已经安装并登录 Codex。“Source code”压缩包是源码快照，不是安装包。
 
-应用每天最多检查一次 GitHub Releases。发现新版本后可以忽略该版本，或打开下载页面；Codex X-Ray 不会自动下载或安装更新。
+支持升级的稳定版每天最多检查一次。发现新的稳定版后，可以忽略，也可以让 Codex X-Ray 在应用内完成下载、签名校验、安装和重启。当前 Linux DEB/RPM 安装包仍需手动升级。
 
 ## 界面
 
@@ -89,7 +89,7 @@ Codex X-Ray 是 Codex 的用量与执行分析工具。它展示额度和 Token�
 
 ### 桌面工具
 
-支持中英文、亮暗主题、系统托盘、手动更新提示和版本检测，并可快速打开 Codex 配置、Session、Skills、Plugins 与 X-Ray SQLite 索引目录。
+支持中英文、亮暗主题、系统托盘、稳定版应用内签名升级和版本检测，并可快速打开 Codex 配置、Session、Skills、Plugins 与 X-Ray SQLite 索引目录。
 
 ## Chat 模型服务如何接入 Codex
 

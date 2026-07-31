@@ -1,6 +1,6 @@
 # Release pipeline
 
-The repository builds draft installers on GitHub. Codex X-Ray checks public GitHub Releases for newer versions and sends users to the download page; it does not download or install updates.
+The repository builds draft installers on GitHub. Stable builds can check, download, verify, install, and restart through Tauri's signed updater.
 
 ## 1. Repository settings
 
@@ -11,6 +11,17 @@ The public repository is <https://github.com/lakernote/codex-xray> and its defau
 - Enable private vulnerability reporting.
 - Keep the non-affiliation disclaimer in the repository description and README.
 - Do not push local databases, Session files, credentials, `.playwright-cli`, `dist`, `node_modules`, or `src-tauri/target`.
+
+### Updater signing
+
+Updater signatures are separate from Apple or Windows publisher signatures. They prevent a modified package from being installed by Codex X-Ray.
+
+The updater public key is committed in `src-tauri/tauri.conf.json`. Keep the matching private key outside the repository and add its complete contents as the protected `release` environment secret:
+
+- `TAURI_SIGNING_PRIVATE_KEY`
+- `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` only when the private key was generated with a password
+
+The current maintainer key is stored at `~/.tauri/codex-xray-updater.key`; back it up securely. Do not commit or share it. The workflow keeps building ordinary installers when the secret is absent, but it cannot publish updater artifacts or `latest.json` in that case.
 
 ## 2. Validate a change
 
@@ -40,12 +51,17 @@ The workflow synchronizes the version across the npm and Tauri manifests, commit
 
 Configure a protected GitHub `release` environment before the first public release. Review every draft artifact, then publish the GitHub Release manually. If a platform build fails, fix the workflow and run the same version again. An existing draft tag is reused and only missing installers are rebuilt; already published releases remain immutable.
 
-Unsigned development artifacts are suitable for internal verification only. Public macOS and Windows distribution should add platform signing and macOS notarization first.
+Unsigned development artifacts are suitable for internal verification only. Public macOS distribution should add a Developer ID Application certificate, hardened runtime, and Apple notarization. Tauri updater signing secures the update package but does not replace Apple's trust checks for a newly downloaded app.
 
 ## 4. Version reminders
 
-The app requests the repository's public GitHub Releases API at most once per day. Stable builds only consider stable releases; prerelease builds also consider prereleases. A user may ignore one version or open the Release page and download an installer manually. No updater signing key or update manifest is required.
+The app asks the signed Tauri updater endpoint at most once per day. A user may ignore one version, or download and install the update in place. The updater verifies the package signature before installation and restarts the app afterward.
 
-GitHub Actions reference:
+GitHub's `/releases/latest` endpoint points to stable releases, so in-app installation currently follows the stable channel. Preview releases remain available from the Releases page. macOS and Windows bundles support the updater; the current Linux DEB/RPM distribution remains manual because Tauri's Linux updater uses AppImage packages.
+
+References:
 
 - <https://v2.tauri.app/distribute/pipelines/github/>
+- <https://v2.tauri.app/plugin/updater/>
+- <https://v2.tauri.app/distribute/sign/macos/>
+- <https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution>

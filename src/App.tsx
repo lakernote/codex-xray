@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   ArrowDown,
   ArrowUp,
@@ -22,6 +23,7 @@ import {
   useRef,
   useState,
 } from "react";
+import type { MouseEvent as ReactMouseEvent } from "react";
 import {
   countdownLabel,
   formatDuration,
@@ -190,9 +192,19 @@ type UsageLedgerRow = {
   accountPoint: PeriodPoint | null;
 };
 
-function InfoTip({ text }: { text: string }) {
+function InfoTip({
+  text,
+  align = "center",
+}: {
+  text: string;
+  align?: "start" | "center" | "end";
+}) {
   return (
-    <span className="info-tip" tabIndex={0} aria-label={text}>
+    <span
+      className={`info-tip align-${align}`}
+      tabIndex={0}
+      aria-label={text}
+    >
       <CircleHelp aria-hidden="true" />
       <span className="info-tooltip" role="tooltip">
         {text}
@@ -287,6 +299,7 @@ function Metric({
   value,
   note,
   secondary,
+  exact,
   help,
   accent = false,
 }: {
@@ -294,6 +307,7 @@ function Metric({
   value: string;
   note?: string;
   secondary?: string;
+  exact?: string;
   help: string;
   accent?: boolean;
 }) {
@@ -303,7 +317,12 @@ function Metric({
         <span>{label}</span>
         <InfoTip text={help} />
       </div>
-      <strong title={value}>{value}</strong>
+      <strong
+        title={exact ?? value}
+        aria-label={exact ? `${label}: ${exact}` : undefined}
+      >
+        {value}
+      </strong>
       {note && <small title={note}>{note}</small>}
       {secondary && (
         <small className="metric-secondary" title={secondary}>
@@ -540,6 +559,7 @@ type ActivityDay = {
   key: string;
   date: Date;
   tokens: number;
+  costUsd: number | null;
   source: TokenDaySource | "none";
   future: boolean;
   level: number;
@@ -560,6 +580,10 @@ function TokenActivityHeatmap({
     () => mergedDailyUsage(official, localToday, costEstimate),
     [costEstimate, localToday, official],
   );
+  const costs = useMemo(
+    () => mergedDailyCosts(costEstimate, localToday),
+    [costEstimate, localToday],
+  );
   const days = useMemo(() => {
     const today = new Date();
     today.setHours(12, 0, 0, 0);
@@ -575,6 +599,7 @@ function TokenActivityHeatmap({
         key,
         date,
         tokens: item?.tokens ?? 0,
+        costUsd: costs.get(key)?.costUsd ?? null,
         source: item?.source ?? "none",
         future: date > today,
       });
@@ -606,7 +631,7 @@ function TokenActivityHeatmap({
                 : 4,
       };
     });
-  }, [usage]);
+  }, [costs, usage]);
   const [focusedKey, setFocusedKey] = useState<string | null>(null);
   const focused =
     days.find((day) => day.key === focusedKey) ??
@@ -662,12 +687,19 @@ function TokenActivityHeatmap({
             <>
               <strong>
                 {focused.tokens > 0
-                  ? `${formatExactTokens(focused.tokens)} Token`
+                  ? `${formatReadableTokens(focused.tokens)} Token${
+                      focused.costUsd == null
+                        ? ""
+                        : ` · ≈ ${formatReadableUsd(focused.costUsd)}`
+                    }`
                   : locale === "zh-CN"
                     ? "无活动"
                     : "No activity"}
               </strong>
               <small>
+                {focused.tokens > 0
+                  ? `${formatExactTokens(focused.tokens)} Token · `
+                  : ""}
                 {dateFormatter.format(focused.date)} ·{" "}
                 {sourceLabel(focused.source)}
               </small>
@@ -715,6 +747,10 @@ function TokenActivityHeatmap({
             day.tokens > 0
               ? `${formatExactTokens(day.tokens)} Token`
               : sourceLabel("none")
+          }${
+            day.costUsd == null
+              ? ""
+              : ` · ≈ ${formatExactUsd(day.costUsd)}`
           } · ${sourceLabel(day.source)}`;
           return (
             <span
@@ -1778,20 +1814,35 @@ function App() {
   ]);
 
   useEffect(() => {
-    if (!traceSnapshot) return;
-    const running = traceSnapshot.sessions.filter(
+    const running = (traceSnapshot?.sessions ?? []).filter(
       (session) => session.status === "running",
     ).length;
-    const waiting = traceSnapshot.sessions.filter((session) =>
+    const waiting = (traceSnapshot?.sessions ?? []).filter((session) =>
       ["waiting_approval", "waiting_input"].includes(session.status),
     ).length;
-    const failed = traceSnapshot.sessions.filter((session) =>
+    const failed = (traceSnapshot?.sessions ?? []).filter((session) =>
       ["failed", "interrupted"].includes(session.status),
     ).length;
-    void invoke("update_tray_summary", { running, waiting, failed }).catch(
-      () => {},
+    const localToday = snapshot?.local_today;
+    const officialToday = snapshot?.daily_usage.find(
+      (item) => item.start_date === localDateKey(),
     );
-  }, [traceSnapshot]);
+    const todayTokens =
+      localToday?.total_tokens ?? officialToday?.tokens ?? null;
+    const indexedTodayCost = costEstimate?.daily.find(
+      (item) => item.date === localDateKey(),
+    );
+    const todayCostUsd =
+      localToday?.estimated_cost_usd ?? indexedTodayCost?.cost_usd ?? null;
+    void invoke("update_tray_summary", {
+      running,
+      waiting,
+      failed,
+      todayTokens,
+      todayCostUsd,
+      locale,
+    }).catch(() => {});
+  }, [costEstimate, locale, snapshot, traceSnapshot]);
 
   useEffect(() => {
     if (
@@ -1945,9 +1996,21 @@ function App() {
   const openExternal = (url: string) => {
     void invoke("open_external", { url });
   };
+  const startWindowDrag = (event: ReactMouseEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return;
+    void getCurrentWindow().startDragging().catch(() => {
+      // The native title bar remains the fallback outside the Tauri runtime.
+    });
+  };
 
   return (
     <div className="app-shell">
+      <div
+        className="window-titlebar"
+        data-tauri-drag-region
+        onMouseDown={startWindowDrag}
+        aria-hidden="true"
+      />
       <aside className="sidebar">
         <div className="brand">
           <BrandMark />
@@ -2289,9 +2352,22 @@ function App() {
           <div className="today-total">
             <div className="heading-with-help">
               <p>{t("usage.today")}</p>
-              <InfoTip text={t("usage.todayHelp")} />
+              <InfoTip text={t("usage.todayHelp")} align="start" />
             </div>
-            <strong>{formatReadableTokens(todayTotal)}</strong>
+            <strong
+              title={`${formatExactTokens(todayTotal)} Token`}
+              aria-label={`${t("usage.today")}: ${formatExactTokens(todayTotal)} Token`}
+            >
+              {formatReadableTokens(todayTotal)}
+            </strong>
+            <div
+              className="today-cost-line"
+              title={formatExactUsd(todayCost)}
+            >
+              <span>{t("usage.todayCost")}</span>
+              <strong>{formatReadableUsd(todayCost)}</strong>
+              <small>{t("usage.estimated")}</small>
+            </div>
             <div className="today-source-line">
               <SourceBadge type={localToday ? "local" : "official"}>
                 {localToday
@@ -2315,6 +2391,11 @@ function App() {
             <Metric
               label={t("usage.input")}
               value={formatReadableTokens(localToday?.input_tokens)}
+              exact={
+                localToday
+                  ? `${formatExactTokens(localToday.input_tokens)} Token`
+                  : undefined
+              }
               note={
                 localToday ? undefined : t("usage.noBreakdown")
               }
@@ -2329,6 +2410,11 @@ function App() {
                   : t("usage.cachedInput")
               }
               value={formatReadableTokens(localToday?.cached_input_tokens)}
+              exact={
+                localToday
+                  ? `${formatExactTokens(localToday.cached_input_tokens)} Token`
+                  : undefined
+              }
               note={
                 localToday ? undefined : t("usage.noBreakdown")
               }
@@ -2338,6 +2424,11 @@ function App() {
             <Metric
               label={t("usage.uncachedInput")}
               value={formatReadableTokens(localToday?.uncached_input_tokens)}
+              exact={
+                localToday
+                  ? `${formatExactTokens(localToday.uncached_input_tokens)} Token`
+                  : undefined
+              }
               note={
                 localToday ? undefined : t("usage.noBreakdown")
               }
@@ -2346,6 +2437,11 @@ function App() {
             <Metric
               label={t("usage.output")}
               value={formatReadableTokens(localToday?.output_tokens)}
+              exact={
+                localToday
+                  ? `${formatExactTokens(localToday.output_tokens)} Token`
+                  : undefined
+              }
               note={
                 localToday ? undefined : t("usage.noBreakdown")
               }
@@ -2371,11 +2467,21 @@ function App() {
               <Metric
                 label={t("account.lifetime")}
                 value={formatReadableTokens(snapshot.summary?.lifetime_tokens)}
+                exact={
+                  snapshot.summary?.lifetime_tokens == null
+                    ? undefined
+                    : `${formatExactTokens(snapshot.summary.lifetime_tokens)} Token`
+                }
                 help={t("account.lifetimeHelp")}
               />
               <Metric
                 label={t("account.peak")}
                 value={formatReadableTokens(snapshot.summary?.peak_daily_tokens)}
+                exact={
+                  snapshot.summary?.peak_daily_tokens == null
+                    ? undefined
+                    : `${formatExactTokens(snapshot.summary.peak_daily_tokens)} Token`
+                }
                 help={t("account.peakHelp")}
               />
               <Metric

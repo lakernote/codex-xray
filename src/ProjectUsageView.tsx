@@ -1,5 +1,8 @@
 import {
+  ArrowDown,
+  ArrowUp,
   ArrowUpRight,
+  ArrowUpDown,
   ChevronDown,
   ChevronRight,
   Folder,
@@ -29,6 +32,19 @@ type Props = {
   onRefresh: () => void;
   onOpenTrace: (sessionId: string, turnId?: string) => void;
   onLoadTurns: (sessionId: string) => Promise<void>;
+};
+
+type ProjectSortKey =
+  | "recent"
+  | "fresh"
+  | "cache"
+  | "output"
+  | "tokens"
+  | "cost";
+type SortDirection = "asc" | "desc";
+type ProjectSort = {
+  key: ProjectSortKey;
+  direction: SortDirection;
 };
 
 function copy(locale: Locale, zh: string, en: string): string {
@@ -130,27 +146,121 @@ export default function ProjectUsageView({
   const [turnErrors, setTurnErrors] = useState<Map<string, string>>(
     () => new Map(),
   );
+  const [projectSort, setProjectSort] = useState<ProjectSort>({
+    key: "recent",
+    direction: "desc",
+  });
   const normalizedQuery = query.trim().toLocaleLowerCase(locale);
 
   const visibleProjects = useMemo(() => {
     const projects = snapshot?.projects ?? [];
-    if (!normalizedQuery) return projects;
-    return projects
-      .map((project) => {
-        const projectMatches = `${project.name} ${project.path}`
-          .toLocaleLowerCase(locale)
-          .includes(normalizedQuery);
-        const conversations = projectMatches
-          ? project.conversations
-          : project.conversations.filter((conversation) =>
-              `${conversation.title ?? ""} ${conversation.id} ${conversation.models.join(" ")}`
-                .toLocaleLowerCase(locale)
-                .includes(normalizedQuery),
-            );
-        return { ...project, conversations };
-      })
-      .filter((project) => project.conversations.length > 0);
-  }, [locale, normalizedQuery, snapshot]);
+    const visible = normalizedQuery
+      ? projects
+          .map((project) => {
+            const projectMatches = `${project.name} ${project.path}`
+              .toLocaleLowerCase(locale)
+              .includes(normalizedQuery);
+            const conversations = projectMatches
+              ? project.conversations
+              : project.conversations.filter((conversation) =>
+                  `${conversation.title ?? ""} ${conversation.id} ${conversation.models.join(" ")}`
+                    .toLocaleLowerCase(locale)
+                    .includes(normalizedQuery),
+                );
+            return { ...project, conversations };
+          })
+          .filter((project) => project.conversations.length > 0)
+      : [...projects];
+
+    return visible.sort((left, right) => {
+      let comparison = 0;
+      if (projectSort.key === "recent") {
+        comparison =
+          (Date.parse(left.updated_at ?? "") || 0) -
+          (Date.parse(right.updated_at ?? "") || 0);
+      } else if (projectSort.key === "fresh") {
+        comparison = freshInput(left) - freshInput(right);
+      } else if (projectSort.key === "cache") {
+        comparison = left.cached_input_tokens - right.cached_input_tokens;
+      } else if (projectSort.key === "output") {
+        comparison = left.output_tokens - right.output_tokens;
+      } else if (projectSort.key === "tokens") {
+        comparison = left.total_tokens - right.total_tokens;
+      } else {
+        comparison = left.cost_usd - right.cost_usd;
+      }
+      if (comparison !== 0) {
+        return projectSort.direction === "asc" ? comparison : -comparison;
+      }
+      return (
+        (Date.parse(right.updated_at ?? "") || 0) -
+          (Date.parse(left.updated_at ?? "") || 0) ||
+        left.name.localeCompare(right.name, locale)
+      );
+    });
+  }, [locale, normalizedQuery, projectSort, snapshot]);
+
+  const changeProjectSort = (key: ProjectSortKey) => {
+    setProjectSort((current) => ({
+      key,
+      direction:
+        current.key === key && current.direction === "desc" ? "asc" : "desc",
+    }));
+  };
+
+  const sortHeader = (
+    key: ProjectSortKey,
+    zhLabel: string,
+    enLabel: string,
+    zhMeaning?: string,
+    enMeaning?: string,
+  ) => {
+    const active = projectSort.key === key;
+    const label = copy(locale, zhLabel, enLabel);
+    const meaning = copy(locale, zhMeaning ?? zhLabel, enMeaning ?? enLabel);
+    const nextDirection: SortDirection =
+      active && projectSort.direction === "desc" ? "asc" : "desc";
+    const directionLabel = copy(
+      locale,
+      nextDirection === "asc" ? "升序" : "降序",
+      nextDirection === "asc" ? "ascending" : "descending",
+    );
+    const SortIcon = active
+      ? projectSort.direction === "asc"
+        ? ArrowUp
+        : ArrowDown
+      : ArrowUpDown;
+    return (
+      <button
+        className="project-usage-sort-button"
+        type="button"
+        data-active={active}
+        onClick={() => changeProjectSort(key)}
+        title={copy(
+          locale,
+          `按${meaning}${directionLabel}排列项目`,
+          `Sort projects by ${meaning} ${directionLabel}`,
+        )}
+        aria-label={copy(
+          locale,
+          `按${meaning}${directionLabel}排列项目`,
+          `Sort projects by ${meaning} ${directionLabel}`,
+        )}
+      >
+        <span>{label}</span>
+        <SortIcon aria-hidden="true" />
+      </button>
+    );
+  };
+
+  const ariaSort = (
+    key: ProjectSortKey,
+  ): "ascending" | "descending" | "none" =>
+    projectSort.key === key
+      ? projectSort.direction === "asc"
+        ? "ascending"
+        : "descending"
+      : "none";
 
   const toggleProject = (path: string) => {
     setExpandedProjects((current) => {
@@ -241,17 +351,19 @@ export default function ProjectUsageView({
             )}
           </span>
         </div>
-        <label className="project-usage-search">
-          <Search aria-hidden="true" />
-          <span className="sr-only">
-            {copy(locale, "搜索项目或对话", "Search projects or conversations")}
-          </span>
-          <input
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder={copy(locale, "搜索项目或对话", "Search project or conversation")}
-          />
-        </label>
+        <div className="project-usage-tools">
+          <label className="project-usage-search">
+            <Search aria-hidden="true" />
+            <span className="sr-only">
+              {copy(locale, "搜索项目或对话", "Search projects or conversations")}
+            </span>
+            <input
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder={copy(locale, "搜索项目或对话", "Search project or conversation")}
+            />
+          </label>
+        </div>
       </header>
 
       <div className="project-usage-summary">
@@ -304,12 +416,30 @@ export default function ProjectUsageView({
           </caption>
           <thead>
             <tr>
-              <th>{copy(locale, "项目 / 对话 / Turn", "Project / conversation / turn")}</th>
-              <th>{copy(locale, "未缓存输入", "Fresh input")}</th>
-              <th>{copy(locale, "缓存读取", "Cache read")}</th>
-              <th>{copy(locale, "输出", "Output")}</th>
-              <th>{copy(locale, "总 Token", "Total tokens")}</th>
-              <th>{copy(locale, "估算成本", "Est. cost")}</th>
+              <th aria-sort={ariaSort("recent")}>
+                {sortHeader(
+                  "recent",
+                  "项目 / 对话 / Turn",
+                  "Project / conversation / turn",
+                  "最近活跃时间",
+                  "recent activity",
+                )}
+              </th>
+              <th aria-sort={ariaSort("fresh")}>
+                {sortHeader("fresh", "未缓存输入", "Fresh input")}
+              </th>
+              <th aria-sort={ariaSort("cache")}>
+                {sortHeader("cache", "缓存读取", "Cache read")}
+              </th>
+              <th aria-sort={ariaSort("output")}>
+                {sortHeader("output", "输出", "Output")}
+              </th>
+              <th aria-sort={ariaSort("tokens")}>
+                {sortHeader("tokens", "总 Token", "Total tokens")}
+              </th>
+              <th aria-sort={ariaSort("cost")}>
+                {sortHeader("cost", "估算成本", "Est. cost")}
+              </th>
             </tr>
           </thead>
           <tbody>

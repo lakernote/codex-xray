@@ -20,7 +20,10 @@
         "minHeight": 680,
         "center": true,
         "resizable": true,
-        "fullscreen": false
+        "fullscreen": false,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "acceptFirstMouse": true
       }
     ],
     "security": {
@@ -29,7 +32,7 @@
   },
   "bundle": {
     "active": true,
-    "createUpdaterArtifacts": false,
+    "createUpdaterArtifacts": true,
     "targets": "all",
     "category": "DeveloperTool",
     "icon": [
@@ -40,5 +43,13 @@
       "icons/icon.ico"
     ],
     "shortDescription": "See, understand, and configure every layer of Codex."
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDZBRjA4NEQ0REI3MkJEMUEKUldRYXZYTGIxSVR3YXVQQTNSZjl3NXRmeUJhbko1OUp3aXYrbldyUkRkb0VTVndKUmxsRFFrSHEK",
+      "endpoints": [
+        "https://github.com/lakernote/codex-xray/releases/latest/download/latest.json"
+      ]
+    }
   }
 }

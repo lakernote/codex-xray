@@ -5,7 +5,7 @@ try {
   document.documentElement.style.colorScheme = theme;
   document
     .querySelector('meta[name="theme-color"]')
-    ?.setAttribute("content", theme === "dark" ? "#080a09" : "#f7f8f5");
+    ?.setAttribute("content", theme === "dark" ? "#101210" : "#f7f7f5");
 } catch {
   document.documentElement.dataset.theme = "light";
   document.documentElement.style.colorScheme = "light";

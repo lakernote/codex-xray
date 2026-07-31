@@ -35,9 +35,9 @@ Preview installers are available on the [GitHub Releases page](https://github.co
 | Ubuntu / Debian · 64-bit | `_amd64.deb` |
 | Fedora / RHEL · 64-bit | `.x86_64.rpm` |
 
-These preview builds are not yet signed with a trusted publisher certificate or notarized, so the operating system may show an unidentified-developer warning. Codex must already be installed and authenticated. The “Source code” archives are source snapshots, not installers.
+These preview builds are not yet signed with a trusted publisher certificate or notarized, so the first installation may show an unidentified-developer warning. Codex must already be installed and authenticated. The “Source code” archives are source snapshots, not installers.
 
-The app checks GitHub Releases at most once per day. When a newer version is available, you can ignore that version or open its download page. Codex X-Ray never downloads or installs an update automatically.
+Updater-enabled stable builds check at most once per day. When a newer stable version is available, you can ignore it or let Codex X-Ray download, verify, install, and restart in place. The current Linux DEB/RPM packages continue to update manually.
 
 ## Screenshots
 
@@ -83,7 +83,7 @@ Save multiple provider profiles with separate models, endpoints, protocols, and 
 
 ### Desktop tools
 
-Chinese and English interfaces, light and dark themes, system tray operation, manual update notifications, version detection, and shortcuts to Codex configuration, Sessions, Skills, Plugins, and X-Ray's SQLite index.
+Chinese and English interfaces, light and dark themes, system tray operation, signed in-app stable updates, version detection, and shortcuts to Codex configuration, Sessions, Skills, Plugins, and X-Ray's SQLite index.
 
 ## How Chat providers connect to Codex
 

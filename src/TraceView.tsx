@@ -4,10 +4,13 @@ import {
   CircleHelp,
   Folder,
   FolderOpen,
+  LoaderCircle,
   MessageSquareText,
   PanelLeftClose,
   PanelLeftOpen,
   RefreshCw,
+  RotateCcw,
+  ScanSearch,
   Search,
   X,
 } from "lucide-react";
@@ -1721,6 +1724,9 @@ export default function TraceView({
           <header>
             <div>
               <h2>{copy(locale, "项目与对话", "Projects & conversations")}</h2>
+              <small>
+                {copy(locale, "最近活跃优先", "Most recently active first")}
+              </small>
             </div>
             <span>{sessions.length}</span>
           </header>
@@ -2038,18 +2044,26 @@ export default function TraceView({
                     </code>
                   )}
                 </div>
-                <div className="trace-lite-session-action">
-                  <button
-                    onClick={() => void analyzeSelected()}
-                    disabled={analyzingId !== null}
-                  >
-                    {analyzingId === selected.id
-                      ? copy(locale, "正在分析…", "Analyzing…")
-                      : detail
-                        ? copy(locale, "重新分析", "Analyze again")
-                        : copy(locale, "分析对话", "Analyze conversation")}
-                  </button>
-                </div>
+                {detail && !detailLoading && (
+                  <div className="trace-lite-session-action">
+                    <button
+                      type="button"
+                      className="secondary-action"
+                      onClick={() => void analyzeSelected()}
+                      disabled={analyzingId !== null}
+                      aria-busy={analyzingId === selected.id}
+                    >
+                      {analyzingId === selected.id ? (
+                        <LoaderCircle className="spinning" aria-hidden="true" />
+                      ) : (
+                        <RotateCcw aria-hidden="true" />
+                      )}
+                      {analyzingId === selected.id
+                        ? copy(locale, "正在分析…", "Analyzing…")
+                        : copy(locale, "重新分析", "Analyze again")}
+                    </button>
+                  </div>
+                )}
               </header>
 
               {detailLoading && (
@@ -2079,8 +2093,11 @@ export default function TraceView({
                   </strong>
                   <p>{detailError}</p>
                   <button
+                    type="button"
+                    className="primary-action"
                     onClick={() => void analyzeSelected()}
                     disabled={analyzingId !== null}
+                    aria-busy={analyzingId === selected.id}
                   >
                     {copy(locale, "重试", "Retry")}
                   </button>
@@ -2120,10 +2137,20 @@ export default function TraceView({
                     </div>
                   </dl>
                   <button
+                    type="button"
+                    className="primary-action"
                     onClick={() => void analyzeSelected()}
                     disabled={analyzingId !== null}
+                    aria-busy={analyzingId === selected.id}
                   >
-                    {copy(locale, "开始分析", "Analyze")}
+                    {analyzingId === selected.id ? (
+                      <LoaderCircle className="spinning" aria-hidden="true" />
+                    ) : (
+                      <ScanSearch aria-hidden="true" />
+                    )}
+                    {analyzingId === selected.id
+                      ? copy(locale, "正在分析…", "Analyzing…")
+                      : copy(locale, "分析这个对话", "Analyze this conversation")}
                   </button>
                 </section>
               )}

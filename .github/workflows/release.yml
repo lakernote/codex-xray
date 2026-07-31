@@ -199,6 +199,9 @@ jobs:
     environment: release
     permissions:
       contents: write
+    env:
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
@@ -223,6 +226,11 @@ jobs:
         with:
           workspaces: "./src-tauri -> target"
       - run: npm ci
+      - name: Disable updater artifacts when signing is not configured
+        if: env.TAURI_SIGNING_PRIVATE_KEY == ''
+        shell: bash
+        run: |
+          node -e 'const fs=require("fs"); const path="src-tauri/tauri.conf.json"; const config=JSON.parse(fs.readFileSync(path,"utf8")); config.bundle.createUpdaterArtifacts=false; fs.writeFileSync(path, JSON.stringify(config, null, 2)+"\n");'
       - uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -240,9 +248,11 @@ jobs:
             - Ubuntu / Debian 64-bit: `_amd64.deb`
             - Fedora / RHEL 64-bit: `.x86_64.rpm`
 
-            The app checks GitHub Releases for newer versions and sends users here to download manually. Installers are not yet signed with a trusted publisher certificate or notarized. See `CHANGELOG.md` for changes.
+            Builds with updater signing configured support in-app download, signature verification, installation, and restart. Installers are not yet signed with an Apple Developer ID or notarized. See `CHANGELOG.md` for changes.
           releaseDraft: true
           prerelease: ${{ needs.prepare.outputs.prerelease }}
+          uploadUpdaterJson: true
+          updaterJsonPreferNsis: true
           retryAttempts: 0
           args: ${{ matrix.args }}
 

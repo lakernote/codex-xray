@@ -1,115 +1,57 @@
 import { getVersion } from "@tauri-apps/api/app";
-import { ExternalLink, RefreshCw, X } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { relaunch } from "@tauri-apps/plugin-process";
+import {
+  check as checkForUpdate,
+  type DownloadEvent,
+  type Update,
+} from "@tauri-apps/plugin-updater";
+import {
+  Download,
+  ExternalLink,
+  LoaderCircle,
+  RefreshCw,
+  X,
+} from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { localDateKey } from "./format";
 import type { Locale } from "./i18n";
 
-const RELEASES_API =
-  "https://api.github.com/repos/lakernote/codex-xray/releases?per_page=30";
 const RELEASES_PAGE = "https://github.com/lakernote/codex-xray/releases";
-const LAST_CHECK_KEY = "codex-xray.update-last-check.v1";
-const IGNORED_VERSION_KEY = "codex-xray.update-ignored-version.v1";
-
-type GitHubRelease = {
-  tag_name: string;
-  name: string | null;
-  html_url: string;
-  body: string | null;
-  published_at: string | null;
-  draft: boolean;
-  prerelease: boolean;
-};
+const LAST_CHECK_KEY = "codex-xray.update-last-check.v2";
+const IGNORED_VERSION_KEY = "codex-xray.update-ignored-version.v2";
 
 type ReleaseSnapshot = {
   currentVersion: string;
-  channel: "stable" | "beta";
   version: string;
-  name: string;
-  url: string;
   notes: string | null;
   publishedAt: string | null;
 };
 
-type ParsedVersion = {
-  core: [number, number, number];
-  prerelease: Array<number | string>;
-};
-
-type UpdatePhase = "idle" | "checking" | "current" | "available" | "error";
+type UpdatePhase =
+  | "idle"
+  | "checking"
+  | "current"
+  | "available"
+  | "downloading"
+  | "installing"
+  | "error";
 
 type Props = {
   locale: Locale;
   onOpenUrl: (url: string) => void;
 };
 
-function parseVersion(raw: string): ParsedVersion | null {
-  const match = raw
-    .trim()
-    .replace(/^v/i, "")
-    .match(/^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/);
-  if (!match) return null;
-  const prerelease = match[4]
-    ? match[4].split(".").map((part) => {
-        const numeric = Number(part);
-        return /^\d+$/.test(part) ? numeric : part.toLowerCase();
-      })
-    : [];
-  return {
-    core: [Number(match[1]), Number(match[2]), Number(match[3])],
-    prerelease,
-  };
-}
-
-function compareVersions(left: string, right: string): number {
-  const a = parseVersion(left);
-  const b = parseVersion(right);
-  if (!a || !b) return 0;
-  for (let index = 0; index < a.core.length; index += 1) {
-    if (a.core[index] !== b.core[index]) {
-      return a.core[index] > b.core[index] ? 1 : -1;
-    }
+function readableError(reason: unknown, zh: boolean): string {
+  const message = reason instanceof Error ? reason.message : String(reason);
+  if (message.includes("404")) {
+    return zh
+      ? "更新服务尚未就绪，请稍后重试。"
+      : "The update service is not ready yet. Try again later.";
   }
-  if (a.prerelease.length === 0 && b.prerelease.length === 0) return 0;
-  if (a.prerelease.length === 0) return 1;
-  if (b.prerelease.length === 0) return -1;
-  const length = Math.max(a.prerelease.length, b.prerelease.length);
-  for (let index = 0; index < length; index += 1) {
-    const leftPart = a.prerelease[index];
-    const rightPart = b.prerelease[index];
-    if (leftPart === undefined) return -1;
-    if (rightPart === undefined) return 1;
-    if (leftPart === rightPart) continue;
-    if (typeof leftPart === "number" && typeof rightPart === "string") return -1;
-    if (typeof leftPart === "string" && typeof rightPart === "number") return 1;
-    return leftPart > rightPart ? 1 : -1;
-  }
-  return 0;
+  return message;
 }
 
-function latestRelease(
-  releases: GitHubRelease[],
-  currentVersion: string,
-): GitHubRelease | null {
-  const betaChannel = currentVersion.includes("-");
-  return (
-    releases
-      .filter(
-        (release) =>
-          !release.draft &&
-          (betaChannel || !release.prerelease) &&
-          parseVersion(release.tag_name) != null &&
-          compareVersions(release.tag_name, currentVersion) > 0,
-      )
-      .sort((left, right) => compareVersions(right.tag_name, left.tag_name))[0] ??
-    null
-  );
-}
-
-function readableError(reason: unknown): string {
-  return reason instanceof Error ? reason.message : String(reason);
-}
-
-function releaseNotes(value: string | null): string | null {
+function releaseNotes(value: string | undefined): string | null {
   const normalized = value?.trim();
   if (!normalized) return null;
   return normalized.length > 700
@@ -119,67 +61,64 @@ function releaseNotes(value: string | null): string | null {
 
 export default function UpdateControl({ locale, onOpenUrl }: Props) {
   const zh = locale === "zh-CN";
+  const updateRef = useRef<Update | null>(null);
+  const downloadedBytesRef = useRef(0);
+  const downloadTotalRef = useRef<number | null>(null);
   const [currentVersion, setCurrentVersion] = useState("");
   const [snapshot, setSnapshot] = useState<ReleaseSnapshot | null>(null);
   const [phase, setPhase] = useState<UpdatePhase>("idle");
   const [dialogOpen, setDialogOpen] = useState(false);
   const [manualAttempt, setManualAttempt] = useState(false);
+  const [downloadPercent, setDownloadPercent] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const check = useCallback(async (manual: boolean, version: string) => {
-    if (!version) return;
-    if (manual) setManualAttempt(true);
-    setPhase("checking");
-    setError(null);
-    const controller = new AbortController();
-    const timeout = window.setTimeout(() => controller.abort(), 12_000);
-    try {
-      const response = await fetch(RELEASES_API, {
-        headers: {
-          Accept: "application/vnd.github+json",
-        },
-        cache: "no-store",
-        signal: controller.signal,
-      });
-      if (!response.ok) {
-        throw new Error(`GitHub API HTTP ${response.status}`);
-      }
-      const releases = (await response.json()) as GitHubRelease[];
-      const release = latestRelease(releases, version);
-      window.localStorage.setItem(LAST_CHECK_KEY, localDateKey());
-      if (!release) {
-        setSnapshot(null);
-        setPhase("current");
-        return;
-      }
-      const next: ReleaseSnapshot = {
-        currentVersion: version,
-        channel: version.includes("-") ? "beta" : "stable",
-        version: release.tag_name.replace(/^v/i, ""),
-        name: release.name?.trim() || release.tag_name,
-        url: release.html_url || RELEASES_PAGE,
-        notes: releaseNotes(release.body),
-        publishedAt: release.published_at,
-      };
-      setSnapshot(next);
-      const ignored = window.localStorage.getItem(IGNORED_VERSION_KEY);
-      if (!manual && ignored === next.version) {
-        setPhase("idle");
-        return;
-      }
-      setPhase("available");
-      setDialogOpen(true);
-    } catch (reason) {
-      if (manual) {
-        setError(readableError(reason));
-        setPhase("error");
-      } else {
-        setPhase("idle");
-      }
-    } finally {
-      window.clearTimeout(timeout);
-    }
+  const closeUpdateResource = useCallback(() => {
+    const update = updateRef.current;
+    updateRef.current = null;
+    if (update) void update.close().catch(() => undefined);
   }, []);
+
+  const check = useCallback(
+    async (manual: boolean, version: string) => {
+      if (!version) return;
+      if (manual) setManualAttempt(true);
+      setPhase("checking");
+      setError(null);
+      closeUpdateResource();
+      try {
+        const update = await checkForUpdate({ timeout: 12_000 });
+        window.localStorage.setItem(LAST_CHECK_KEY, localDateKey());
+        if (!update) {
+          setSnapshot(null);
+          setPhase("current");
+          return;
+        }
+        updateRef.current = update;
+        const next: ReleaseSnapshot = {
+          currentVersion: update.currentVersion,
+          version: update.version,
+          notes: releaseNotes(update.body),
+          publishedAt: update.date ?? null,
+        };
+        setSnapshot(next);
+        const ignored = window.localStorage.getItem(IGNORED_VERSION_KEY);
+        if (!manual && ignored === next.version) {
+          setPhase("idle");
+          return;
+        }
+        setPhase("available");
+        setDialogOpen(true);
+      } catch (reason) {
+        if (manual) {
+          setError(readableError(reason, zh));
+          setPhase("error");
+        } else {
+          setPhase("idle");
+        }
+      }
+    },
+    [closeUpdateResource, zh],
+  );
 
   useEffect(() => {
     let disposed = false;
@@ -205,19 +144,21 @@ export default function UpdateControl({ locale, onOpenUrl }: Props) {
       disposed = true;
       if (initialTimer != null) window.clearTimeout(initialTimer);
       if (dailyTimer != null) window.clearInterval(dailyTimer);
+      closeUpdateResource();
     };
-  }, [check]);
+  }, [check, closeUpdateResource]);
+
+  const busy = phase === "downloading" || phase === "installing";
 
   useEffect(() => {
-    if (!dialogOpen) return;
+    if (!dialogOpen || busy) return;
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape") setDialogOpen(false);
     };
     window.addEventListener("keydown", closeOnEscape);
     return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [dialogOpen]);
+  }, [busy, dialogOpen]);
 
-  const channel = currentVersion.includes("-") ? "beta" : "stable";
   const publishedAt = useMemo(() => {
     if (!snapshot?.publishedAt) return null;
     return new Intl.DateTimeFormat(locale, {
@@ -231,14 +172,59 @@ export default function UpdateControl({ locale, onOpenUrl }: Props) {
     if (snapshot) {
       window.localStorage.setItem(IGNORED_VERSION_KEY, snapshot.version);
     }
+    closeUpdateResource();
     setPhase("idle");
     setDialogOpen(false);
   };
 
-  const openRelease = () => {
-    onOpenUrl(snapshot?.url ?? RELEASES_PAGE);
-    setDialogOpen(false);
+  const updateDownloadProgress = (event: DownloadEvent) => {
+    if (event.event === "Started") {
+      downloadedBytesRef.current = 0;
+      downloadTotalRef.current = event.data.contentLength ?? null;
+      setDownloadPercent(event.data.contentLength ? 0 : null);
+      return;
+    }
+    if (event.event === "Progress") {
+      downloadedBytesRef.current += event.data.chunkLength;
+      const total = downloadTotalRef.current;
+      if (total && total > 0) {
+        setDownloadPercent(
+          Math.min(100, Math.round((downloadedBytesRef.current / total) * 100)),
+        );
+      }
+      return;
+    }
+    setDownloadPercent(100);
+    setPhase("installing");
   };
+
+  const install = async () => {
+    const update = updateRef.current;
+    if (!update) {
+      setError(
+        zh
+          ? "升级信息已失效，请重新检查。"
+          : "The update information expired. Check again.",
+      );
+      setPhase("error");
+      return;
+    }
+    setError(null);
+    setDownloadPercent(null);
+    setPhase("downloading");
+    try {
+      await update.downloadAndInstall(updateDownloadProgress, {
+        timeout: 5 * 60_000,
+      });
+      setPhase("installing");
+      await relaunch();
+    } catch (reason) {
+      setError(readableError(reason, zh));
+      setPhase("error");
+    }
+  };
+
+  const channel = currentVersion.includes("-") ? "beta" : "stable";
 
   return (
     <>
@@ -254,7 +240,7 @@ export default function UpdateControl({ locale, onOpenUrl }: Props) {
           <button
             type="button"
             onClick={() => void check(true, currentVersion)}
-            disabled={phase === "checking" || !currentVersion}
+            disabled={phase === "checking" || busy || !currentVersion}
             aria-label={zh ? "检查新版本" : "Check for a new version"}
             title={zh ? "检查新版本" : "Check for a new version"}
           >
@@ -271,7 +257,7 @@ export default function UpdateControl({ locale, onOpenUrl }: Props) {
             className="sidebar-update-action"
             onClick={() => setDialogOpen(true)}
           >
-            {zh ? `发现 v${snapshot.version}` : `v${snapshot.version} available`}
+            {zh ? `可升级到 v${snapshot.version}` : `Update to v${snapshot.version}`}
           </button>
         )}
 
@@ -283,7 +269,7 @@ export default function UpdateControl({ locale, onOpenUrl }: Props) {
 
         {phase === "error" && error && (
           <small className="sidebar-update-error" role="alert" title={error}>
-            {zh ? "检查失败，请稍后重试" : "Check failed. Try again later."}
+            {zh ? "升级检查失败" : "Update check failed"}
           </small>
         )}
       </section>
@@ -293,7 +279,9 @@ export default function UpdateControl({ locale, onOpenUrl }: Props) {
           className="update-notice-backdrop"
           role="presentation"
           onMouseDown={(event) => {
-            if (event.currentTarget === event.target) setDialogOpen(false);
+            if (!busy && event.currentTarget === event.target) {
+              setDialogOpen(false);
+            }
           }}
         >
           <section
@@ -304,15 +292,16 @@ export default function UpdateControl({ locale, onOpenUrl }: Props) {
           >
             <header>
               <div>
-                <span>{zh ? "版本更新" : "Version update"}</span>
+                <span>{zh ? "应用更新" : "App update"}</span>
                 <h2 id="update-notice-title">
-                  {zh ? "发现新版本" : "A new version is available"}
+                  {zh ? "新版本可以安装" : "An update is ready"}
                 </h2>
               </div>
               <button
                 type="button"
                 className="dialog-close"
                 autoFocus
+                disabled={busy}
                 aria-label={zh ? "稍后提醒" : "Remind me later"}
                 onClick={() => setDialogOpen(false)}
               >
@@ -327,33 +316,95 @@ export default function UpdateControl({ locale, onOpenUrl }: Props) {
               </span>
               <span aria-hidden="true">→</span>
               <span>
-                <small>{zh ? "最新版本" : "Latest"}</small>
+                <small>{zh ? "新版本" : "Update"}</small>
                 <strong>v{snapshot.version}</strong>
               </span>
             </div>
 
             <div className="update-notice-copy">
-              <strong>{snapshot.name}</strong>
               {publishedAt && <small>{publishedAt}</small>}
               {snapshot.notes && <p>{snapshot.notes}</p>}
-              <span>
-                {zh
-                  ? "应用只打开 GitHub Releases，不会自动下载或安装。"
-                  : "The app only opens GitHub Releases. It never downloads or installs updates automatically."}
-              </span>
+              {phase === "downloading" && (
+                <div className="update-download-progress" role="status">
+                  <span>
+                    {zh ? "正在下载并校验" : "Downloading and verifying"}
+                  </span>
+                  <strong>
+                    {downloadPercent == null ? "…" : `${downloadPercent}%`}
+                  </strong>
+                  <i>
+                    <b
+                      style={{
+                        width:
+                          downloadPercent == null ? "18%" : `${downloadPercent}%`,
+                      }}
+                    />
+                  </i>
+                </div>
+              )}
+              {phase === "installing" && (
+                <span role="status">
+                  {zh
+                    ? "正在安装，完成后会自动重启。"
+                    : "Installing. The app will restart when ready."}
+                </span>
+              )}
+              {phase === "error" && error && (
+                <span className="update-notice-error" role="alert">
+                  {error}
+                </span>
+              )}
+              {phase === "available" && (
+                <span>
+                  {zh
+                    ? "升级包会先验证签名，再替换当前版本并重启。"
+                    : "The package is signature-verified before the current version is replaced and restarted."}
+                </span>
+              )}
             </div>
 
             <footer>
-              <button type="button" className="text-button" onClick={ignore}>
-                {zh ? "忽略此版本" : "Ignore this version"}
-              </button>
+              {!busy && phase !== "error" && (
+                <button type="button" className="text-button" onClick={ignore}>
+                  {zh ? "忽略此版本" : "Ignore this version"}
+                </button>
+              )}
+              {phase === "error" && (
+                <button
+                  type="button"
+                  className="text-button"
+                  onClick={() => onOpenUrl(RELEASES_PAGE)}
+                >
+                  <ExternalLink aria-hidden="true" />
+                  {zh ? "查看发布页" : "Open releases"}
+                </button>
+              )}
               <button
                 type="button"
                 className="primary-action"
-                onClick={openRelease}
+                disabled={busy}
+                onClick={() => void install()}
               >
-                <ExternalLink aria-hidden="true" />
-                {zh ? "前往下载" : "Open downloads"}
+                {busy ? (
+                  <LoaderCircle className="spinning" aria-hidden="true" />
+                ) : (
+                  <Download aria-hidden="true" />
+                )}
+                {phase === "downloading"
+                  ? zh
+                    ? "正在下载"
+                    : "Downloading"
+                  : phase === "installing"
+                    ? zh
+                      ? "正在安装"
+                      : "Installing"
+                    : phase === "error"
+                      ? zh
+                        ? "重试安装"
+                        : "Retry install"
+                      : zh
+                        ? "下载并安装"
+                        : "Download and install"}
               </button>
             </footer>
           </section>
