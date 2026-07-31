@@ -929,15 +929,13 @@ pub fn persist_request_profile(
     let mut file = load_profile_file(path)?;
     let previous = file.profiles.insert(profile.id.clone(), profile.clone());
     let changed = previous.as_ref() != Some(&profile);
-    if changed {
-        if let Err(error) = save_profile_file(path, &file) {
-            if let Some(previous) = previous.clone() {
-                file.profiles.insert(profile.id.clone(), previous);
-            } else {
-                file.profiles.remove(&profile.id);
-            }
-            return Err(error);
+    if changed && let Err(error) = save_profile_file(path, &file) {
+        if let Some(previous) = previous.clone() {
+            file.profiles.insert(profile.id.clone(), previous);
+        } else {
+            file.profiles.remove(&profile.id);
         }
+        return Err(error);
     }
     Ok(ProfileRollback {
         profile_id: profile.id,
@@ -1194,7 +1192,7 @@ pub fn probe_provider(request: &ProviderApplyRequest) -> Result<ProviderTestResu
             } else {
                 truncate_message(&stderr)
             },
-            capabilities: provider_test_capabilities(&protocol, request.context_window, false),
+            capabilities: provider_test_capabilities(protocol, request.context_window, false),
         });
     }
     let (response, status) = stdout
@@ -1227,7 +1225,7 @@ pub fn probe_provider(request: &ProviderApplyRequest) -> Result<ProviderTestResu
         latency_ms,
         http_status: Some(http_status),
         message,
-        capabilities: provider_test_capabilities(&protocol, request.context_window, success),
+        capabilities: provider_test_capabilities(protocol, request.context_window, success),
     })
 }
 
