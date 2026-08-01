@@ -17,6 +17,8 @@ import { localDateKey } from "./format";
 import type { Locale } from "./i18n";
 
 const RELEASES_PAGE = "https://github.com/lakernote/codex-xray/releases";
+const LATEST_RELEASE_API =
+  "https://api.github.com/repos/lakernote/codex-xray/releases/latest";
 const LAST_CHECK_KEY = "codex-xray.update-last-check.v2";
 const IGNORED_VERSION_KEY = "codex-xray.update-ignored-version.v2";
 
@@ -41,22 +43,91 @@ type Props = {
   onOpenUrl: (url: string) => void;
 };
 
+type GithubRelease = {
+  tag_name?: string;
+};
+
+function compareVersionIdentifiers(left: string, right: string): number {
+  const leftNumeric = /^\d+$/.test(left);
+  const rightNumeric = /^\d+$/.test(right);
+  if (leftNumeric && rightNumeric) return Number(left) - Number(right);
+  if (leftNumeric) return -1;
+  if (rightNumeric) return 1;
+  return left.localeCompare(right);
+}
+
+function compareVersions(left: string, right: string): number {
+  const parse = (value: string) => {
+    const [core, prerelease = ""] = value.replace(/^v/i, "").split("-", 2);
+    return {
+      core: core.split(".").map((part) => Number(part) || 0),
+      prerelease: prerelease ? prerelease.split(".") : [],
+    };
+  };
+  const leftVersion = parse(left);
+  const rightVersion = parse(right);
+  const coreLength = Math.max(
+    leftVersion.core.length,
+    rightVersion.core.length,
+  );
+  for (let index = 0; index < coreLength; index += 1) {
+    const difference =
+      (leftVersion.core[index] ?? 0) - (rightVersion.core[index] ?? 0);
+    if (difference !== 0) return difference;
+  }
+  if (leftVersion.prerelease.length === 0) {
+    return rightVersion.prerelease.length === 0 ? 0 : 1;
+  }
+  if (rightVersion.prerelease.length === 0) return -1;
+  const prereleaseLength = Math.max(
+    leftVersion.prerelease.length,
+    rightVersion.prerelease.length,
+  );
+  for (let index = 0; index < prereleaseLength; index += 1) {
+    const leftIdentifier = leftVersion.prerelease[index];
+    const rightIdentifier = rightVersion.prerelease[index];
+    if (leftIdentifier == null) return -1;
+    if (rightIdentifier == null) return 1;
+    const difference = compareVersionIdentifiers(
+      leftIdentifier,
+      rightIdentifier,
+    );
+    if (difference !== 0) return difference;
+  }
+  return 0;
+}
+
+async function latestStableVersion(): Promise<string | null> {
+  const response = await fetch(LATEST_RELEASE_API, {
+    headers: { Accept: "application/vnd.github+json" },
+    signal: AbortSignal.timeout(8_000),
+  });
+  if (!response.ok) return null;
+  const release = (await response.json()) as GithubRelease;
+  const version = release.tag_name?.trim().replace(/^v/i, "");
+  return version || null;
+}
+
 function readableError(reason: unknown, zh: boolean): string {
   const message = reason instanceof Error ? reason.message : String(reason);
   const normalized = message.toLowerCase();
   const missingPlatform = message.match(
     /platform [`'"]?([^`'"]+)[`'"]? was not found/i,
   )?.[1];
+  const missingFallbacks = message.match(
+    /fallback platforms\s+[`'"]?(\[[^\]]+\])/i,
+  )?.[1];
   if (
     missingPlatform ||
+    missingFallbacks ||
     (normalized.includes("platform") &&
-      normalized.includes("not found") &&
-      normalized.includes("updater"))
+      (normalized.includes("not found") || normalized.includes("were found")) &&
+      normalized.includes("platforms"))
   ) {
     const platform = missingPlatform ? ` (${missingPlatform})` : "";
     return zh
-      ? `当前发布缺少这台电脑的升级包${platform}，请从发布页手动下载，或等待下一版本修复。`
-      : `This release has no updater package for this computer${platform}. Download it from Releases or wait for the next version.`;
+      ? `当前发布缺少这台电脑的应用内升级包${platform}。安装包仍可在发布页手动下载；发布流程会阻止后续版本再次漏包。`
+      : `This release is missing the in-app updater package for this computer${platform}. The installer is still available on Releases, and future releases are blocked if an updater package is missing.`;
   }
   if (message.includes("404")) {
     return zh
@@ -111,6 +182,21 @@ export default function UpdateControl({ locale, onOpenUrl }: Props) {
       setError(null);
       closeUpdateResource();
       try {
+        try {
+          const latestVersion = await latestStableVersion();
+          if (
+            latestVersion &&
+            compareVersions(latestVersion, version) <= 0
+          ) {
+            window.localStorage.setItem(LAST_CHECK_KEY, localDateKey());
+            setSnapshot(null);
+            setPhase("current");
+            return;
+          }
+        } catch {
+          // The signed updater endpoint remains the source of truth when the
+          // GitHub version preflight is unavailable.
+        }
         const update = await checkForUpdate({ timeout: 12_000 });
         window.localStorage.setItem(LAST_CHECK_KEY, localDateKey());
         if (!update) {

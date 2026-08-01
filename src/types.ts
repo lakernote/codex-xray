@@ -666,6 +666,9 @@ export type TraceTimelineEvent = {
   total_tokens: number;
   context_window: number | null;
   context_delta_tokens: number | null;
+  context_before_tokens: number | null;
+  context_after_tokens: number | null;
+  context_reclaimed_tokens: number | null;
   cache_hit_percent: number | null;
   estimated_cost_usd: number | null;
   content_parts: number;
@@ -701,6 +704,9 @@ export type TraceTurnSummary = {
   total_tokens: number;
   cache_hit_percent: number;
   peak_input_tokens: number;
+  first_input_tokens: number;
+  last_input_tokens: number;
+  model_passes: number;
   context_window: number | null;
   context_utilization_percent: number | null;
   context_growth_tokens: number;
@@ -710,6 +716,14 @@ export type TraceTurnSummary = {
   repeated_tool_calls: number;
   repeated_reads: number;
   context_compactions: number;
+  estimated_reclaimed_tokens: number;
+  local_context_bytes: number;
+  session_context_bytes: number;
+  developer_context_bytes: number;
+  world_state_bytes: number;
+  turn_context_bytes: number;
+  memory_context_bytes: number;
+  memory_citations: number;
   large_tool_outputs: number;
   large_tool_output_bytes: number;
   issue_score: number;
@@ -733,6 +747,11 @@ export type TraceSessionDetail = {
   flagged_turns: number;
   flagged_tokens: number;
   flagged_cost_usd: number;
+  model_passes: number;
+  estimated_reclaimed_tokens: number;
+  local_context_bytes: number;
+  memory_context_bytes: number;
+  memory_citations: number;
   turns: TraceTurnSummary[];
   tools: TraceToolAggregate[];
 };

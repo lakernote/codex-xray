@@ -3053,46 +3053,87 @@ nav {
 }
 
 .project-usage-search {
-  position: relative;
-  display: flex;
   width: min(320px, 38%);
   min-width: 240px;
-  height: 42px;
-  align-items: center;
 }
 
-.project-usage-search > svg {
-  position: absolute;
-  left: 13px;
+.app-search-field {
+  display: grid;
+  height: 42px;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+  padding: 0 9px 0 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  background: var(--input-surface);
+  transition:
+    border-color 160ms ease,
+    box-shadow 160ms ease,
+    background-color 160ms ease;
+}
+
+.app-search-field:focus-within {
+  border-color: var(--focus);
+  box-shadow: 0 0 0 3px var(--focus-dim);
+}
+
+.app-search-field > svg {
   width: 16px;
   height: 16px;
   color: var(--text-muted);
+  stroke-width: 1.8;
   pointer-events: none;
 }
 
-.project-usage-search input {
+.app-search-field input {
+  min-width: 0;
   width: 100%;
-  height: 42px;
-  padding: 0 13px 0 40px;
-  border: 1px solid var(--line-strong);
-  border-radius: 7px;
-  outline: none;
+  padding: 0;
+  border: 0;
+  outline: 0;
   color: var(--text-strong);
-  background: var(--input-surface);
+  background: transparent;
   font: inherit;
   font-size: 13px;
-  transition:
-    border-color 160ms ease,
-    box-shadow 160ms ease;
 }
 
-.project-usage-search input::placeholder {
+.app-search-field input:focus,
+.app-search-field input:focus-visible {
+  outline: 0;
+  box-shadow: none;
+}
+
+.app-search-field input::-webkit-search-cancel-button {
+  appearance: none;
+}
+
+.app-search-field input::placeholder {
   color: var(--text-muted);
 }
 
-.project-usage-search input:focus {
-  border-color: var(--focus);
-  box-shadow: 0 0 0 3px var(--focus-dim);
+.app-search-field button {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  color: var(--text-muted);
+  background: transparent;
+  cursor: pointer;
+  place-items: center;
+}
+
+.app-search-field button:hover {
+  color: var(--text-strong);
+  background: var(--surface-hover);
+}
+
+.app-search-field button svg {
+  width: 14px;
+  height: 14px;
+  stroke-width: 1.8;
 }
 
 .project-usage-summary {
@@ -7288,56 +7329,7 @@ footer {
 }
 
 .trace-lite-search {
-  display: grid;
-  height: 38px;
-  grid-template-columns: 18px minmax(0, 1fr) 24px;
-  align-items: center;
-  gap: 6px;
   margin: 15px 0 11px;
-  padding: 0 9px;
-  border: 1px solid var(--line-strong);
-  border-radius: 5px;
-  background: rgba(255, 255, 255, 0.015);
-}
-
-.trace-lite-search > svg {
-  width: 15px;
-  height: 15px;
-  color: #717b70;
-  stroke-width: 1.8;
-}
-
-.trace-lite-search input {
-  width: 100%;
-  border: 0;
-  outline: 0;
-  color: #dce4d8;
-  background: transparent;
-  font: inherit;
-  font-size: 12px;
-}
-
-.trace-lite-search input::placeholder {
-  color: #5f685f;
-}
-
-.trace-lite-search button {
-  display: grid;
-  width: 24px;
-  height: 24px;
-  padding: 0;
-  border: 0;
-  border-radius: 50%;
-  color: #879185;
-  background: rgba(255, 255, 255, 0.04);
-  cursor: pointer;
-  place-items: center;
-}
-
-.trace-lite-search button svg {
-  width: 13px;
-  height: 13px;
-  stroke-width: 1.8;
 }
 
 .trace-lite-projects {
@@ -8128,6 +8120,120 @@ footer {
   white-space: nowrap;
 }
 
+.trace-context-flow {
+  display: grid;
+  gap: 12px;
+  padding: 15px 0 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.trace-context-flow > header {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.trace-context-flow > header > strong {
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.trace-context-stages {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 34px minmax(0, 1fr) 34px minmax(0, 1fr);
+  align-items: center;
+  max-width: 700px;
+}
+
+.trace-context-stages > span {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.trace-context-stages small {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.trace-context-stages strong {
+  overflow: hidden;
+  color: var(--text-strong);
+  font-family: "SFMono-Regular", Menlo, Consolas, monospace;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 620;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.trace-context-stages > i {
+  position: relative;
+  height: 1px;
+  margin: 0 10px;
+  background: var(--line-strong);
+}
+
+.trace-context-stages > i::after {
+  position: absolute;
+  top: -3px;
+  right: 0;
+  width: 6px;
+  height: 6px;
+  border-top: 1px solid var(--text-muted);
+  border-right: 1px solid var(--text-muted);
+  content: "";
+  transform: rotate(45deg);
+}
+
+.trace-context-flow > dl {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0;
+  margin: 0;
+}
+
+.trace-context-flow > dl > div {
+  min-width: 0;
+  padding: 0 12px;
+  border-left: 1px solid var(--line);
+}
+
+.trace-context-flow > dl > div:first-child {
+  padding-left: 0;
+  border-left: 0;
+}
+
+.trace-context-flow dt,
+.trace-context-flow dd {
+  margin: 0;
+}
+
+.trace-context-flow dt {
+  display: flex;
+  min-height: 18px;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.trace-context-flow dd {
+  overflow: hidden;
+  margin-top: 4px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 580;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.trace-compaction-meta .reclaimed b {
+  color: var(--accent-strong);
+}
+
 .trace-lite-events {
   padding-top: 17px;
 }
@@ -8701,7 +8807,6 @@ footer {
 }
 
 .trace-lite button:focus-visible,
-.trace-lite input:focus-visible,
 .trace-call-inspector > summary:focus-visible {
   outline: 2px solid var(--focus);
   outline-offset: 2px;
@@ -8749,6 +8854,16 @@ footer {
   }
 
   .trace-lite-resources > span:nth-child(4) {
+    padding-left: 0;
+    border-left: 0;
+  }
+
+  .trace-context-flow > dl {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    row-gap: 12px;
+  }
+
+  .trace-context-flow > dl > div:nth-child(3) {
     padding-left: 0;
     border-left: 0;
   }
@@ -10824,8 +10939,6 @@ html[data-theme="light"]
     .report-display-switcher button:hover,
     .report-display-switcher button.selected,
     .provenance-rule-banner,
-    .trace-lite-search,
-    .trace-lite-search button,
     .trace-event-filters button,
     .trace-event-filters b,
     .trace-lite-turn-detail,

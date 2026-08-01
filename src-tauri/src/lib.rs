@@ -38,8 +38,6 @@ use settings::{
     restore_point as settings_restore_point, save_restore_point as save_settings_restore_point,
 };
 use storage::{health as storage_health, read_cache, write_cache};
-use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
-use tauri::tray::TrayIconBuilder;
 use tauri::{Manager, WindowEvent};
 use trace_analysis::{
     ExtensionUsageSnapshot, TraceIndexCache, TraceSessionDetail, TraceSnapshot,
@@ -59,85 +57,6 @@ struct UsageState {
     provider_profiles_path: PathBuf,
     provider_restore_path: PathBuf,
     settings_restore_path: PathBuf,
-}
-
-#[tauri::command]
-fn update_tray_summary(
-    app: tauri::AppHandle,
-    running: usize,
-    waiting: usize,
-    failed: usize,
-    today_tokens: Option<u64>,
-    today_cost_usd: Option<f64>,
-    locale: String,
-) -> Result<(), String> {
-    let tray = app
-        .tray_by_id("codex-xray")
-        .ok_or_else(|| "未找到 Codex X-Ray 托盘图标".to_string())?;
-    let token_title = today_tokens
-        .map(|tokens| compact_token_count(tokens, &locale))
-        .unwrap_or_else(|| "—".to_string());
-    let cost_value = today_cost_usd
-        .filter(|cost| cost.is_finite())
-        .map(|cost| format!("${cost:.2}"));
-    let title = cost_value
-        .as_ref()
-        .map(|cost| format!("{token_title} · ≈{cost}"))
-        .unwrap_or_else(|| token_title.clone());
-    let exact_tokens = today_tokens
-        .map(format_token_count)
-        .unwrap_or_else(|| "—".to_string());
-    let exact_cost = cost_value.unwrap_or_else(|| "—".to_string());
-    let tooltip = if locale == "zh-CN" {
-        format!(
-            "Codex X-Ray · 今日 {exact_tokens} Token · 约 {exact_cost} · {running} 运行 · {waiting} 等待 · {failed} 需处理"
-        )
-    } else {
-        format!(
-            "Codex X-Ray · Today {exact_tokens} Token · ≈{exact_cost} · {running} running · {waiting} waiting · {failed} attention"
-        )
-    };
-
-    #[cfg(target_os = "macos")]
-    tray.set_title(Some(&title))
-        .map_err(|error| format!("更新菜单栏用量失败：{error}"))?;
-
-    tray.set_tooltip(Some(tooltip))
-        .map_err(|error| format!("更新托盘状态失败：{error}"))
-}
-
-fn compact_token_count(tokens: u64, locale: &str) -> String {
-    if locale == "zh-CN" {
-        if tokens >= 100_000_000 {
-            return format!("{:.1}亿", tokens as f64 / 100_000_000.0);
-        }
-        if tokens >= 10_000 {
-            return format!("{:.1}万", tokens as f64 / 10_000.0);
-        }
-        return tokens.to_string();
-    }
-    if tokens >= 1_000_000_000 {
-        return format!("{:.1}B", tokens as f64 / 1_000_000_000.0);
-    }
-    if tokens >= 1_000_000 {
-        return format!("{:.1}M", tokens as f64 / 1_000_000.0);
-    }
-    if tokens >= 1_000 {
-        return format!("{:.1}K", tokens as f64 / 1_000.0);
-    }
-    tokens.to_string()
-}
-
-fn format_token_count(tokens: u64) -> String {
-    let text = tokens.to_string();
-    let mut formatted = String::with_capacity(text.len() + text.len() / 3);
-    for (index, character) in text.chars().enumerate() {
-        if index > 0 && (text.len() - index).is_multiple_of(3) {
-            formatted.push(',');
-        }
-        formatted.push(character);
-    }
-    formatted
 }
 
 #[tauri::command]
@@ -185,17 +104,6 @@ async fn get_environment_snapshot(
     })
     .await
     .map_err(|error| format!("环境诊断后台任务异常：{error}"))?
-}
-
-fn show_main(app: &tauri::AppHandle) -> Result<(), String> {
-    let window = app
-        .get_webview_window("main")
-        .ok_or_else(|| "Codex X-Ray main window is unavailable".to_string())?;
-    window
-        .show()
-        .and_then(|_| window.unminimize())
-        .and_then(|_| window.set_focus())
-        .map_err(|error| format!("Unable to show Codex X-Ray: {error}"))
 }
 
 #[cfg(target_os = "macos")]
@@ -1101,48 +1009,6 @@ pub fn run() {
             });
             app.manage(chat_bridge.clone());
             tauri::async_runtime::spawn(chat_bridge::serve(chat_bridge));
-
-            let open_item =
-                MenuItem::with_id(app, "show_main", "打开 Codex X-Ray", true, None::<&str>)?;
-            let background_item = MenuItem::with_id(
-                app,
-                "background_status",
-                "关闭窗口后继续运行",
-                false,
-                None::<&str>,
-            )?;
-            let separator = PredefinedMenuItem::separator(app)?;
-            let quit_item = MenuItem::with_id(app, "quit", "退出 Codex X-Ray", true, None::<&str>)?;
-            let menu =
-                Menu::with_items(app, &[&open_item, &background_item, &separator, &quit_item])?;
-            let mut tray = TrayIconBuilder::with_id("codex-xray")
-                .menu(&menu)
-                .tooltip("Codex X-Ray · Usage, trace & control")
-                .icon_as_template(false);
-
-            // A title-only status item is easy to miss and can be omitted by macOS
-            // when menu-bar space is tight. Keep the app icon present on every
-            // desktop platform, then add the compact usage title beside it on macOS.
-            if let Some(icon) = app.default_window_icon().cloned() {
-                tray = tray.icon(icon);
-            }
-
-            #[cfg(target_os = "macos")]
-            {
-                tray = tray.title("X-Ray");
-            }
-            let tray_icon = tray
-                .on_menu_event(|app, event| match event.id().as_ref() {
-                    "show_main" => {
-                        let _ = show_main(app);
-                    }
-                    "quit" => app.exit(0),
-                    _ => {}
-                })
-                .build(app)?;
-            // TrayIcon is reference-counted. Keep one handle in managed state;
-            // otherwise it is dropped at the end of setup and disappears.
-            app.manage(tray_icon);
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -1150,7 +1016,7 @@ pub fn run() {
                 && let WindowEvent::CloseRequested { api, .. } = event
             {
                 api.prevent_close();
-                let _ = window.hide();
+                window.app_handle().exit(0);
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -1181,18 +1047,12 @@ pub fn run() {
             apply_codex_settings,
             restore_codex_settings,
             get_environment_snapshot,
-            update_tray_summary,
             open_external,
             reveal_local_path
         ])
         .build(tauri::generate_context!())
         .expect("error while building Codex X-Ray")
-        .run(|app, event| {
-            #[cfg(target_os = "macos")]
-            if let tauri::RunEvent::Reopen { .. } = event {
-                let _ = show_main(app);
-            }
-        });
+        .run(|_, _| {});
 }
 
 pub fn run_credential_helper_if_requested() -> Option<i32> {

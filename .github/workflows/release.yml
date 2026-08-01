@@ -27,6 +27,8 @@ jobs:
     environment: release
     permissions:
       contents: write
+    env:
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
     outputs:
       tag: ${{ steps.metadata.outputs.tag }}
       prerelease: ${{ steps.metadata.outputs.prerelease }}
@@ -42,6 +44,12 @@ jobs:
         with:
           node-version: "22"
           cache: npm
+      - name: Require updater signing key
+        run: |
+          if [ -z "${TAURI_SIGNING_PRIVATE_KEY}" ]; then
+            echo "::error::The release environment is missing TAURI_SIGNING_PRIVATE_KEY. Signed in-app updater packages cannot be produced."
+            exit 1
+          fi
       - name: Resolve release metadata
         id: metadata
         env:
@@ -265,11 +273,6 @@ jobs:
         with:
           workspaces: "./src-tauri -> target"
       - run: npm ci
-      - name: Disable updater artifacts when signing is not configured
-        if: env.TAURI_SIGNING_PRIVATE_KEY == ''
-        shell: bash
-        run: |
-          node -e 'const fs=require("fs"); const path="src-tauri/tauri.conf.json"; const config=JSON.parse(fs.readFileSync(path,"utf8")); config.bundle.createUpdaterArtifacts=false; fs.writeFileSync(path, JSON.stringify(config, null, 2)+"\n");'
       - uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

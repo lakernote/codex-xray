@@ -81,7 +81,7 @@ Codex X-Ray 是 Codex 的用量与执行分析工具。它展示额度和 Token�
 
 ### 执行追踪
 
-按项目、对话和 Turn 浏览 Session，还原从用户输入、LLM 返回，到 CLI/MCP/Skill 调用、工具结果、上下文变化、Token 结算和回合结束的完整过程。
+按项目、对话和 Turn 浏览 Session，还原从用户输入、LLM 返回，到 CLI/MCP/Skill 调用、工具结果、Token 结算和回合结束的完整过程。上下文剖析会展示首次、峰值和末次模型输入，压缩边界与估算减少量，本地准备记录和明确的 Memory 使用证据；不会把上下文压缩误算成长期 Memory。
 
 ### 模型接入与 Codex 配置
 
@@ -165,7 +165,7 @@ npm run tauri build
 - 独立 App Server 无法保证看到另一个 Codex App 进程的全部瞬时状态；界面会区分官方状态与本地事件推断。
 - Codex App Server 与 Session 格式仍可能变化，兼容性以当前安装版本为准。
 - Chat 兼容桥转换文本、流式输出、函数工具、工具结果和 Token 用量；原生 Web Search、加密 Reasoning、服务端压缩等 Responses 专属能力不会被转换。
-- 使用 Chat 接入时需要保持 Codex X-Ray 运行；点击窗口左上角红色关闭按钮只会隐藏窗口。macOS 顶部菜单栏会保留 `X-Ray` 入口，可重新打开窗口或彻底退出。
+- 使用 Chat 接入时需要保持 Codex X-Ray 运行；关闭 Codex X-Ray 会停止本地兼容桥。
 - 当前主要在 macOS 上验证；发布流程覆盖 Windows、Linux 和 macOS。
 
 ## License

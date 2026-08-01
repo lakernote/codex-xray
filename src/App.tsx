@@ -1814,37 +1814,6 @@ function App() {
   ]);
 
   useEffect(() => {
-    const running = (traceSnapshot?.sessions ?? []).filter(
-      (session) => session.status === "running",
-    ).length;
-    const waiting = (traceSnapshot?.sessions ?? []).filter((session) =>
-      ["waiting_approval", "waiting_input"].includes(session.status),
-    ).length;
-    const failed = (traceSnapshot?.sessions ?? []).filter((session) =>
-      ["failed", "interrupted"].includes(session.status),
-    ).length;
-    const localToday = snapshot?.local_today;
-    const officialToday = snapshot?.daily_usage.find(
-      (item) => item.start_date === localDateKey(),
-    );
-    const todayTokens =
-      localToday?.total_tokens ?? officialToday?.tokens ?? null;
-    const indexedTodayCost = costEstimate?.daily.find(
-      (item) => item.date === localDateKey(),
-    );
-    const todayCostUsd =
-      localToday?.estimated_cost_usd ?? indexedTodayCost?.cost_usd ?? null;
-    void invoke("update_tray_summary", {
-      running,
-      waiting,
-      failed,
-      todayTokens,
-      todayCostUsd,
-      locale,
-    }).catch(() => {});
-  }, [costEstimate, locale, snapshot, traceSnapshot]);
-
-  useEffect(() => {
     if (
       activeView !== "usage" ||
       usageReport !== "projects" ||

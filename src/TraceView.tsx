@@ -11,8 +11,6 @@ import {
   RefreshCw,
   RotateCcw,
   ScanSearch,
-  Search,
-  X,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -23,6 +21,7 @@ import {
   formatSyncTime,
 } from "./format";
 import type { Locale, Translator } from "./i18n";
+import SearchField from "./SearchField";
 import type {
   TraceSessionDetail,
   TraceSessionSummary,
@@ -535,10 +534,27 @@ function eventExplanation(
     );
   }
   if (event.kind === "compaction") {
+    const windowLabel = event.sequence
+      ? copy(locale, `第 ${event.sequence} 个上下文窗口`, `context window ${event.sequence}`)
+      : copy(locale, "一个新的上下文窗口", "a new context window");
+    const historyLabel = event.content_parts > 0
+      ? copy(
+          locale,
+          `替换后的历史包含 ${event.content_parts} 条结构化记录`,
+          `the replacement history contains ${event.content_parts} structured records`,
+        )
+      : copy(locale, "Session 未记录替换后的条目数", "the Session did not record the replacement item count");
+    const reclaimedLabel = event.context_reclaimed_tokens != null
+      ? copy(
+          locale,
+          `；按压缩前后相邻模型输入估算，减少了 ${formatExactTokens(event.context_reclaimed_tokens)} Token`,
+          `; adjacent model-input records estimate ${formatExactTokens(event.context_reclaimed_tokens)} fewer tokens`,
+        )
+      : "";
     return copy(
       locale,
-      "上下文接近限制，Codex 将较早内容压缩成摘要，供后续模型处理继续使用。",
-      "Codex compressed older context into a summary so later model passes could continue.",
+      `Codex 生成了${windowLabel}，${historyLabel}。压缩摘要以加密内容保存在 Session 中，X-Ray 只能确认大小，不能还原正文${reclaimedLabel}。`,
+      `Codex created ${windowLabel}; ${historyLabel}. The compacted summary is encrypted in the Session, so X-Ray can verify its size but cannot recover the text${reclaimedLabel}.`,
     );
   }
   if (event.label === "user_prompt") {
@@ -762,6 +778,45 @@ function TimelineEventRow({
               <span>
                 {copy(locale, "API 等价成本", "API-equivalent cost")}{" "}
                 <b>{formatExactUsd(event.estimated_cost_usd)}</b>
+              </span>
+            )}
+          </div>
+        )}
+        {event.kind === "compaction" && (
+          <div className="trace-lite-event-meta trace-compaction-meta">
+            {event.sequence != null && (
+              <span>
+                {copy(locale, "窗口", "Window")} <b>#{event.sequence}</b>
+              </span>
+            )}
+            {event.content_parts > 0 && (
+              <span>
+                {copy(locale, "替换后历史", "Replacement history")} {" "}
+                <b>{event.content_parts}</b>
+              </span>
+            )}
+            {event.encrypted_bytes > 0 && (
+              <span>
+                {copy(locale, "加密摘要", "Encrypted summary")} {" "}
+                <b>{formatBytes(event.encrypted_bytes, locale)}</b>
+              </span>
+            )}
+            {event.context_before_tokens != null && (
+              <span>
+                {copy(locale, "压缩前", "Before")} {" "}
+                <b>{formatExactTokens(event.context_before_tokens)}</b>
+              </span>
+            )}
+            {event.context_after_tokens != null && (
+              <span>
+                {copy(locale, "压缩后", "After")} {" "}
+                <b>{formatExactTokens(event.context_after_tokens)}</b>
+              </span>
+            )}
+            {event.context_reclaimed_tokens != null && (
+              <span className="reclaimed">
+                {copy(locale, "估算减少", "Estimated reduction")} {" "}
+                <b>{formatExactTokens(event.context_reclaimed_tokens)}</b>
               </span>
             )}
           </div>
@@ -1085,6 +1140,88 @@ function TurnTimeline({
               <em>{formatExactUsd(turn.estimated_cost_usd)}</em>
             </span>
           </div>
+
+          <section className="trace-context-flow">
+            <header>
+              <strong>{copy(locale, "本轮上下文", "Context in this turn")}</strong>
+              <TraceInfoTip
+                text={copy(
+                  locale,
+                  "首次、峰值和末次输入来自每次 token_count 的 input_tokens；它们是模型实际读入的上下文。压缩减少量只在压缩前后都有相邻用量记录时估算。",
+                  "First, peak, and final input come from input_tokens in each token_count record—the context actually read by the model. Compaction reduction is estimated only when adjacent usage records exist on both sides.",
+                )}
+              />
+            </header>
+            <div className="trace-context-stages">
+              <span>
+                <small>{copy(locale, "首次模型输入", "First model input")}</small>
+                <strong>{formatExactTokens(turn.first_input_tokens)}</strong>
+              </span>
+              <i aria-hidden="true" />
+              <span>
+                <small>{copy(locale, "上下文峰值", "Context peak")}</small>
+                <strong>{formatExactTokens(turn.peak_input_tokens)}</strong>
+              </span>
+              <i aria-hidden="true" />
+              <span>
+                <small>{copy(locale, "末次模型输入", "Final model input")}</small>
+                <strong>{formatExactTokens(turn.last_input_tokens)}</strong>
+              </span>
+            </div>
+            <dl>
+              <div>
+                <dt>{copy(locale, "模型处理", "Model passes")}</dt>
+                <dd>{turn.model_passes}</dd>
+              </div>
+              <div>
+                <dt>{copy(locale, "上下文压缩", "Compactions")}</dt>
+                <dd>
+                  {turn.context_compactions}
+                  {turn.estimated_reclaimed_tokens > 0
+                    ? copy(
+                        locale,
+                        ` · 估算减少 ${formatReadableTokens(turn.estimated_reclaimed_tokens)}`,
+                        ` · ~${formatReadableTokens(turn.estimated_reclaimed_tokens)} reduced`,
+                      )
+                    : ""}
+                </dd>
+              </div>
+              <div>
+                <dt>
+                  {copy(locale, "本地准备记录", "Local preparation")}
+                  <TraceInfoTip
+                    text={copy(
+                      locale,
+                      `这是 Session 中可识别的基础指令、工具定义、Developer 指令、world_state 与 turn_context 的记录大小，不是 Token 数。基础与工具 ${formatBytes(turn.session_context_bytes, locale)} · Developer ${formatBytes(turn.developer_context_bytes, locale)} · world_state ${formatBytes(turn.world_state_bytes, locale)} · turn_context ${formatBytes(turn.turn_context_bytes, locale)}。`,
+                      `This is the recorded size of recognizable base instructions, tool definitions, developer instructions, world_state, and turn_context—not a token count. Base and tools ${formatBytes(turn.session_context_bytes, locale)} · Developer ${formatBytes(turn.developer_context_bytes, locale)} · world_state ${formatBytes(turn.world_state_bytes, locale)} · turn_context ${formatBytes(turn.turn_context_bytes, locale)}.`,
+                    )}
+                  />
+                </dt>
+                <dd>{formatBytes(turn.local_context_bytes, locale)}</dd>
+              </div>
+              <div>
+                <dt>
+                  Memory
+                  <TraceInfoTip
+                    text={copy(
+                      locale,
+                      "这里只统计 Session 中明确出现的 Memory 注入或 memory_citation。未发现不等于 Memory 被关闭，也不会把压缩摘要算作长期 Memory。",
+                      "This counts only explicit Memory injection or memory_citation evidence in the Session. Not observed does not mean Memory is disabled, and compacted summaries are not counted as long-term Memory.",
+                    )}
+                  />
+                </dt>
+                <dd>
+                  {turn.memory_context_bytes > 0 || turn.memory_citations > 0
+                    ? copy(
+                        locale,
+                        `${turn.memory_citations} 条引用${turn.memory_context_bytes > 0 ? ` · ${formatBytes(turn.memory_context_bytes, locale)} 注入` : ""}`,
+                        `${turn.memory_citations} citations${turn.memory_context_bytes > 0 ? ` · ${formatBytes(turn.memory_context_bytes, locale)} injected` : ""}`,
+                      )
+                    : copy(locale, "未发现使用记录", "No usage evidence")}
+                </dd>
+              </div>
+            </dl>
+          </section>
 
           <section className="trace-lite-events">
             {visibleEvents.length > 0 ? (
@@ -1731,23 +1868,22 @@ export default function TraceView({
             <span>{sessions.length}</span>
           </header>
 
-          <label className="trace-lite-search">
-            <Search aria-hidden="true" />
-            <input
-              type="search"
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              placeholder={copy(locale, "搜索项目或对话", "Search projects or conversations")}
-            />
-            {query && (
-              <button
-                onClick={() => setQuery("")}
-                aria-label={copy(locale, "清除搜索", "Clear search")}
-              >
-                <X aria-hidden="true" />
-              </button>
+          <SearchField
+            className="trace-lite-search"
+            value={query}
+            onChange={setQuery}
+            placeholder={copy(
+              locale,
+              "搜索项目或对话",
+              "Search projects or conversations",
             )}
-          </label>
+            ariaLabel={copy(
+              locale,
+              "搜索项目或对话",
+              "Search projects or conversations",
+            )}
+            clearLabel={copy(locale, "清除搜索", "Clear search")}
+          />
 
           {batchConfirmation && (
             <div
@@ -2208,8 +2344,8 @@ export default function TraceView({
                         <p>
                           {copy(
                             locale,
-                            `${detail.turns.length} 个回合 · ${eventCounts.get("all") ?? 0} 条事件`,
-                            `${detail.turns.length} turns · ${eventCounts.get("all") ?? 0} events`,
+                            `${detail.turns.length} 个回合 · ${detail.model_passes} 次模型处理 · ${eventCounts.get("all") ?? 0} 条事件${detail.estimated_reclaimed_tokens > 0 ? ` · 压缩估算减少 ${formatReadableTokens(detail.estimated_reclaimed_tokens)}` : ""}`,
+                            `${detail.turns.length} turns · ${detail.model_passes} model passes · ${eventCounts.get("all") ?? 0} events${detail.estimated_reclaimed_tokens > 0 ? ` · ~${formatReadableTokens(detail.estimated_reclaimed_tokens)} reduced by compaction` : ""}`,
                           )}
                         </p>
                       </div>

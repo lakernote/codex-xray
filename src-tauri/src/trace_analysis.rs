@@ -18,7 +18,7 @@ use crate::storage::{
     TraceMirrorUsageEvent, read_index_entries, write_index_entries, write_trace_mirror,
 };
 
-const TRACE_INDEX_SCHEMA_VERSION: u32 = 12;
+const TRACE_INDEX_SCHEMA_VERSION: u32 = 13;
 const TRACE_INDEX_NAMESPACE: &str = "trace-files";
 const MAX_TRACE_FILES: usize = 240;
 const MAX_PARSED_LINE_BYTES: usize = 512 * 1024;
@@ -129,6 +129,40 @@ struct TracePhaseEvent {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
+struct TraceCompactionEvent {
+    source_order: usize,
+    notification_source_order: Option<usize>,
+    timestamp_ms: i64,
+    window_number: Option<usize>,
+    history_items: usize,
+    encrypted_summary_bytes: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct CompactedLine {
+    timestamp: Option<String>,
+    #[serde(rename = "type")]
+    entry_type: String,
+    payload: CompactedPayload,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(default)]
+struct CompactedPayload {
+    window_number: Option<usize>,
+    replacement_history: Vec<CompactedHistoryItem>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(default)]
+struct CompactedHistoryItem {
+    #[serde(rename = "type")]
+    kind: String,
+    encrypted_content: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
 struct TraceTurnRecord {
     id: String,
     model: String,
@@ -142,9 +176,13 @@ struct TraceTurnRecord {
     duration_ms: Option<u64>,
     tool_events: Vec<TraceToolEvent>,
     phase_events: Vec<TracePhaseEvent>,
+    compaction_events: Vec<TraceCompactionEvent>,
     structured_failures: usize,
-    compaction_events_ms: Vec<i64>,
-    compaction_event_orders: Vec<usize>,
+    developer_context_bytes: u64,
+    world_state_bytes: u64,
+    turn_context_bytes: u64,
+    memory_context_bytes: u64,
+    memory_citations: usize,
     unattributed_large_outputs: usize,
     unattributed_large_output_bytes: u64,
 }
@@ -172,6 +210,9 @@ struct IndexedTraceFile {
     started_at: Option<String>,
     updated_at: Option<String>,
     model: Option<String>,
+    base_instructions_bytes: u64,
+    dynamic_tool_definitions: usize,
+    dynamic_tool_bytes: u64,
     turns: BTreeMap<String, TraceTurnRecord>,
     open_turn_ids: BTreeSet<String>,
     usage_events: Vec<TraceUsageEvent>,
@@ -280,6 +321,9 @@ pub struct TraceTimelineEvent {
     pub total_tokens: u64,
     pub context_window: Option<u64>,
     pub context_delta_tokens: Option<i64>,
+    pub context_before_tokens: Option<u64>,
+    pub context_after_tokens: Option<u64>,
+    pub context_reclaimed_tokens: Option<u64>,
     pub cache_hit_percent: Option<f64>,
     pub estimated_cost_usd: Option<f64>,
     pub content_parts: usize,
@@ -311,6 +355,9 @@ pub struct TraceTurnSummary {
     pub total_tokens: u64,
     pub cache_hit_percent: f64,
     pub peak_input_tokens: u64,
+    pub first_input_tokens: u64,
+    pub last_input_tokens: u64,
+    pub model_passes: usize,
     pub context_window: Option<u64>,
     pub context_utilization_percent: Option<f64>,
     pub context_growth_tokens: u64,
@@ -320,6 +367,14 @@ pub struct TraceTurnSummary {
     pub repeated_tool_calls: usize,
     pub repeated_reads: usize,
     pub context_compactions: usize,
+    pub estimated_reclaimed_tokens: u64,
+    pub local_context_bytes: u64,
+    pub session_context_bytes: u64,
+    pub developer_context_bytes: u64,
+    pub world_state_bytes: u64,
+    pub turn_context_bytes: u64,
+    pub memory_context_bytes: u64,
+    pub memory_citations: usize,
     pub large_tool_outputs: usize,
     pub large_tool_output_bytes: u64,
     pub issue_score: u64,
@@ -345,6 +400,11 @@ pub struct TraceSessionDetail {
     pub flagged_turns: usize,
     pub flagged_tokens: u64,
     pub flagged_cost_usd: f64,
+    pub model_passes: usize,
+    pub estimated_reclaimed_tokens: u64,
+    pub local_context_bytes: u64,
+    pub memory_context_bytes: u64,
+    pub memory_citations: usize,
     pub turns: Vec<TraceTurnSummary>,
     pub tools: Vec<TraceToolAggregate>,
 }
@@ -495,6 +555,7 @@ struct SessionUsage {
 #[derive(Default)]
 struct TurnUsage {
     first_input_tokens: Option<u64>,
+    last_input_tokens: Option<u64>,
     max_input_tokens: u64,
     input_tokens: u64,
     cached_input_tokens: u64,
@@ -1386,12 +1447,31 @@ fn summarize_session_detail(
     session.repeated_reads = turns.iter().map(|turn| turn.repeated_reads).sum();
     session.context_compactions = turns.iter().map(|turn| turn.context_compactions).sum();
     session.large_tool_outputs = turns.iter().map(|turn| turn.large_tool_outputs).sum();
+    let model_passes = turns.iter().map(|turn| turn.model_passes).sum();
+    let estimated_reclaimed_tokens = turns
+        .iter()
+        .map(|turn| turn.estimated_reclaimed_tokens)
+        .fold(0_u64, u64::saturating_add);
+    let local_context_bytes = turns
+        .iter()
+        .map(|turn| turn.local_context_bytes)
+        .fold(0_u64, u64::saturating_add);
+    let memory_context_bytes = turns
+        .iter()
+        .map(|turn| turn.memory_context_bytes)
+        .fold(0_u64, u64::saturating_add);
+    let memory_citations = turns.iter().map(|turn| turn.memory_citations).sum();
 
     TraceSessionDetail {
         session,
         flagged_turns,
         flagged_tokens,
         flagged_cost_usd,
+        model_passes,
+        estimated_reclaimed_tokens,
+        local_context_bytes,
+        memory_context_bytes,
+        memory_citations,
         turns,
         tools,
     }
@@ -1409,6 +1489,7 @@ fn summarize_turn(
     let mut previous_input_tokens = None;
     for (event_index, event) in events.iter().enumerate() {
         usage.first_input_tokens.get_or_insert(event.input_tokens);
+        usage.last_input_tokens = Some(event.input_tokens);
         usage.max_input_tokens = usage.max_input_tokens.max(event.input_tokens);
         usage.input_tokens = usage.input_tokens.saturating_add(event.input_tokens);
         usage.cached_input_tokens = usage
@@ -1463,6 +1544,9 @@ fn summarize_turn(
             total_tokens: event.total_tokens,
             context_window: event.context_window,
             context_delta_tokens,
+            context_before_tokens: None,
+            context_after_tokens: None,
+            context_reclaimed_tokens: None,
             cache_hit_percent: Some(percentage(event.cached_input_tokens, event.input_tokens)),
             estimated_cost_usd: event_cost.map(|cost| cost.total_usd),
             content_parts: 0,
@@ -1538,6 +1622,9 @@ fn summarize_turn(
                 total_tokens: 0,
                 context_window: None,
                 context_delta_tokens: None,
+                context_before_tokens: None,
+                context_after_tokens: None,
+                context_reclaimed_tokens: None,
                 cache_hit_percent: None,
                 estimated_cost_usd: None,
                 content_parts: 0,
@@ -1589,6 +1676,9 @@ fn summarize_turn(
                 total_tokens: 0,
                 context_window: None,
                 context_delta_tokens: None,
+                context_before_tokens: None,
+                context_after_tokens: None,
+                context_reclaimed_tokens: None,
                 cache_hit_percent: None,
                 estimated_cost_usd: None,
                 content_parts: phase.content_parts,
@@ -1656,6 +1746,9 @@ fn summarize_turn(
                 total_tokens: 0,
                 context_window: None,
                 context_delta_tokens: None,
+                context_before_tokens: None,
+                context_after_tokens: None,
+                context_reclaimed_tokens: None,
                 cache_hit_percent: None,
                 estimated_cost_usd: None,
                 content_parts: 0,
@@ -1715,24 +1808,43 @@ fn summarize_turn(
                 timeline.push(result_event);
             }
         }
-        for (compaction_index, timestamp_ms) in record.compaction_events_ms.iter().enumerate() {
+        for compaction in &record.compaction_events {
+            let before_tokens = events
+                .iter()
+                .rev()
+                .find(|event| event.source_order < compaction.source_order)
+                .map(|event| event.input_tokens);
+            let after_boundary = compaction
+                .notification_source_order
+                .unwrap_or(compaction.source_order);
+            let after_tokens = events
+                .iter()
+                .find(|event| event.source_order > after_boundary)
+                .map(|event| event.input_tokens);
+            let reclaimed_tokens = before_tokens
+                .zip(after_tokens)
+                .map(|(before, after)| before.saturating_sub(after))
+                .filter(|value| *value > 0);
             timeline.push(TraceTimelineEvent {
-                source_order: record
-                    .compaction_event_orders
-                    .get(compaction_index)
-                    .copied()
-                    .unwrap_or_default(),
-                source_end_order: None,
-                timestamp: millis_to_rfc3339(*timestamp_ms),
+                source_order: compaction.source_order,
+                source_end_order: compaction.notification_source_order,
+                timestamp: millis_to_rfc3339(compaction.timestamp_ms),
                 completed_at: None,
                 execution_completed_at: None,
                 kind: "compaction".to_string(),
                 category: "context".to_string(),
                 label: "context".to_string(),
                 status: "warning".to_string(),
-                sequence: None,
+                sequence: compaction.window_number,
                 call_id: None,
-                source_type: Some("event_msg.context_compacted".to_string()),
+                source_type: Some(
+                    if compaction.notification_source_order.is_some() {
+                        "compacted + event_msg.context_compacted"
+                    } else {
+                        "compacted"
+                    }
+                    .to_string(),
+                ),
                 execution_end_source_type: None,
                 result_source_type: None,
                 server: None,
@@ -1749,13 +1861,18 @@ fn summarize_turn(
                 reasoning_output_tokens: 0,
                 total_tokens: 0,
                 context_window: None,
-                context_delta_tokens: None,
+                context_delta_tokens: before_tokens
+                    .zip(after_tokens)
+                    .map(|(before, after)| signed_token_delta(after, before)),
+                context_before_tokens: before_tokens,
+                context_after_tokens: after_tokens,
+                context_reclaimed_tokens: reclaimed_tokens,
                 cache_hit_percent: None,
                 estimated_cost_usd: None,
-                content_parts: 0,
+                content_parts: compaction.history_items,
                 content_bytes: 0,
                 summary_parts: 0,
-                encrypted_bytes: 0,
+                encrypted_bytes: compaction.encrypted_summary_bytes,
                 output_bytes: 0,
                 exit_code: None,
                 repeated: false,
@@ -1796,6 +1913,9 @@ fn summarize_turn(
                 total_tokens: 0,
                 context_window: None,
                 context_delta_tokens: None,
+                context_before_tokens: None,
+                context_after_tokens: None,
+                context_reclaimed_tokens: None,
                 cache_hit_percent: None,
                 estimated_cost_usd: None,
                 content_parts: 0,
@@ -1890,7 +2010,7 @@ fn summarize_turn(
             None,
         ));
     }
-    let context_compactions = record.map_or(0, |record| record.compaction_events_ms.len());
+    let context_compactions = record.map_or(0, |record| record.compaction_events.len());
     if context_compactions > 0 {
         insights.push(insight(
             "context_compaction",
@@ -1955,6 +2075,32 @@ fn summarize_turn(
             .zip(completed_at.as_deref().and_then(timestamp_millis))
             .map(|(start, end)| end.saturating_sub(start).max(0) as u64)
     });
+    let starts_session = record.is_some_and(|turn| {
+        turn.started_source_order
+            == session
+                .turns
+                .values()
+                .filter_map(|candidate| candidate.started_source_order)
+                .min()
+    });
+    let developer_context_bytes = record.map_or(0, |turn| turn.developer_context_bytes);
+    let world_state_bytes = record.map_or(0, |turn| turn.world_state_bytes);
+    let turn_context_bytes = record.map_or(0, |turn| turn.turn_context_bytes);
+    let session_context_bytes = if starts_session {
+        session
+            .base_instructions_bytes
+            .saturating_add(session.dynamic_tool_bytes)
+    } else {
+        0
+    };
+    let local_context_bytes = developer_context_bytes
+        .saturating_add(world_state_bytes)
+        .saturating_add(turn_context_bytes)
+        .saturating_add(session_context_bytes);
+    let estimated_reclaimed_tokens = timeline
+        .iter()
+        .filter_map(|event| event.context_reclaimed_tokens)
+        .fold(0_u64, u64::saturating_add);
 
     TraceTurnSummary {
         id: turn_id.to_string(),
@@ -1978,6 +2124,9 @@ fn summarize_turn(
         total_tokens: usage.total_tokens,
         cache_hit_percent,
         peak_input_tokens: usage.max_input_tokens,
+        first_input_tokens: usage.first_input_tokens.unwrap_or(0),
+        last_input_tokens: usage.last_input_tokens.unwrap_or(0),
+        model_passes: events.len(),
         context_window: usage.context_window,
         context_utilization_percent,
         context_growth_tokens,
@@ -1987,6 +2136,14 @@ fn summarize_turn(
         repeated_tool_calls,
         repeated_reads,
         context_compactions,
+        estimated_reclaimed_tokens,
+        local_context_bytes,
+        session_context_bytes,
+        developer_context_bytes,
+        world_state_bytes,
+        turn_context_bytes,
+        memory_context_bytes: record.map_or(0, |turn| turn.memory_context_bytes),
+        memory_citations: record.map_or(0, |turn| turn.memory_citations),
         large_tool_outputs,
         large_tool_output_bytes,
         issue_score,
@@ -2344,6 +2501,9 @@ fn parse_trace_file(
     let mut started_at = None;
     let mut updated_at = None;
     let mut model = None;
+    let mut base_instructions_bytes = 0_u64;
+    let mut dynamic_tool_definitions = 0_usize;
+    let mut dynamic_tool_bytes = 0_u64;
     let mut current_model = "unknown".to_string();
     let mut previous_total: Option<RawUsage> = None;
     let mut current_turn = "unassigned".to_string();
@@ -2375,6 +2535,8 @@ fn parse_trace_file(
         let relevant = [
             b"session_meta".as_slice(),
             b"turn_context".as_slice(),
+            b"\"type\":\"world_state\"".as_slice(),
+            b"\"type\":\"compacted\"".as_slice(),
             b"token_count".as_slice(),
             b"task_started".as_slice(),
             b"task_complete".as_slice(),
@@ -2385,6 +2547,7 @@ fn parse_trace_file(
             b"tool_search_call".as_slice(),
             b"tool_search_output".as_slice(),
             b"\"role\":\"user\"".as_slice(),
+            b"\"role\":\"developer\"".as_slice(),
             b"\"type\":\"reasoning\"".as_slice(),
             b"\"phase\":".as_slice(),
             b"context_compacted".as_slice(),
@@ -2395,6 +2558,51 @@ fn parse_trace_file(
         .iter()
         .any(|needle| memmem::find(&line, needle).is_some());
         if !relevant {
+            continue;
+        }
+
+        if memmem::find(&line, b"\"type\":\"compacted\"").is_some()
+            && let Ok(compacted) = serde_json::from_slice::<CompactedLine>(&line)
+            && compacted.entry_type == "compacted"
+        {
+            let Some(timestamp_ms) = compacted.timestamp.as_deref().and_then(timestamp_millis)
+            else {
+                malformed_lines += 1;
+                continue;
+            };
+            if let Some(timestamp) = &compacted.timestamp {
+                if started_at
+                    .as_ref()
+                    .is_none_or(|current| timestamp < current)
+                {
+                    started_at = Some(timestamp.clone());
+                }
+                if updated_at
+                    .as_ref()
+                    .is_none_or(|current| timestamp > current)
+                {
+                    updated_at = Some(timestamp.clone());
+                }
+            }
+            let history_items = compacted.payload.replacement_history.len();
+            let encrypted_summary_bytes = compacted
+                .payload
+                .replacement_history
+                .iter()
+                .find(|item| item.kind == "compaction")
+                .and_then(|item| item.encrypted_content.as_deref())
+                .map_or(0, |value| value.len() as u64);
+            let turn = turns.entry(current_turn.clone()).or_default();
+            turn.id = current_turn.clone();
+            turn.model = current_model.clone();
+            turn.compaction_events.push(TraceCompactionEvent {
+                source_order,
+                notification_source_order: None,
+                timestamp_ms,
+                window_number: compacted.payload.window_number,
+                history_items,
+                encrypted_summary_bytes,
+            });
             continue;
         }
 
@@ -2486,6 +2694,25 @@ fn parse_trace_file(
                     .and_then(Value::as_str)
                     .map(str::to_string)
             });
+            base_instructions_bytes = base_instructions_bytes.max(
+                payload
+                    .get("base_instructions")
+                    .map_or(0, serialized_value_bytes),
+            );
+            if let Some(dynamic_tools) = payload.get("dynamic_tools") {
+                dynamic_tool_definitions =
+                    dynamic_tool_definitions.max(value_item_count(dynamic_tools));
+                dynamic_tool_bytes = dynamic_tool_bytes.max(serialized_value_bytes(dynamic_tools));
+            }
+            continue;
+        }
+        if entry_type == "world_state" {
+            let turn = turns.entry(current_turn.clone()).or_default();
+            turn.id = current_turn.clone();
+            turn.model = current_model.clone();
+            turn.world_state_bytes = turn
+                .world_state_bytes
+                .saturating_add(serialized_value_bytes(payload));
             continue;
         }
         if entry_type == "turn_context" {
@@ -2514,6 +2741,9 @@ fn parse_trace_file(
                     .and_then(Value::as_str)
                     .map(str::to_string);
                 turn.context_source_order = Some(source_order);
+                turn.turn_context_bytes = turn
+                    .turn_context_bytes
+                    .saturating_add(serialized_value_bytes(payload));
             }
             continue;
         }
@@ -2547,14 +2777,29 @@ fn parse_trace_file(
             continue;
         }
         if entry_type == "event_msg" && payload_type == "context_compacted" {
-            context_compactions += 1;
-            if let Some(timestamp_ms) = timestamp.as_deref().and_then(timestamp_millis) {
-                let turn = turns.entry(current_turn.clone()).or_default();
-                turn.id = current_turn.clone();
-                turn.model = current_model.clone();
-                turn.compaction_events_ms.push(timestamp_ms);
-                turn.compaction_event_orders.push(source_order);
+            let timestamp_ms = timestamp
+                .as_deref()
+                .and_then(timestamp_millis)
+                .unwrap_or_default();
+            let turn = turns.entry(current_turn.clone()).or_default();
+            turn.id = current_turn.clone();
+            turn.model = current_model.clone();
+            if let Some(compaction) = turn
+                .compaction_events
+                .iter_mut()
+                .rev()
+                .find(|event| event.notification_source_order.is_none())
+            {
+                compaction.notification_source_order = Some(source_order);
+            } else {
+                turn.compaction_events.push(TraceCompactionEvent {
+                    source_order,
+                    notification_source_order: None,
+                    timestamp_ms,
+                    ..TraceCompactionEvent::default()
+                });
             }
+            context_compactions += 1;
             continue;
         }
         if entry_type == "event_msg"
@@ -2664,6 +2909,15 @@ fn parse_trace_file(
             let Some(timestamp_ms) = timestamp.as_deref().and_then(timestamp_millis) else {
                 continue;
             };
+            if payload_type == "agent_message" {
+                let memory_citation = payload.get("memory_citation").unwrap_or(&Value::Null);
+                if !memory_citation.is_null() {
+                    let turn = turns.entry(current_turn.clone()).or_default();
+                    turn.memory_citations = turn
+                        .memory_citations
+                        .saturating_add(value_item_count(memory_citation));
+                }
+            }
             let content = payload
                 .get("message")
                 .and_then(Value::as_str)
@@ -2704,6 +2958,27 @@ fn parse_trace_file(
             continue;
         }
         let response_role = payload.get("role").and_then(Value::as_str);
+        if entry_type == "response_item"
+            && payload_type == "message"
+            && response_role == Some("developer")
+            && current_turn != "unassigned"
+        {
+            let content = payload.get("content").unwrap_or(&Value::Null);
+            let content_bytes = serialized_value_bytes(content);
+            let content_text = extract_content_text(content).unwrap_or_default();
+            let memory_context = content_text.contains("<memories>")
+                || content_text.contains("<memory_context>")
+                || content_text.contains("memory_context");
+            let turn = turns.entry(current_turn.clone()).or_default();
+            turn.id = current_turn.clone();
+            turn.model = current_model.clone();
+            turn.developer_context_bytes =
+                turn.developer_context_bytes.saturating_add(content_bytes);
+            if memory_context {
+                turn.memory_context_bytes = turn.memory_context_bytes.saturating_add(content_bytes);
+            }
+            continue;
+        }
         let is_user_prompt = payload_type == "message"
             && response_role == Some("user")
             && turns_with_context.contains(&current_turn);
@@ -2918,6 +3193,9 @@ fn parse_trace_file(
         started_at,
         updated_at,
         model,
+        base_instructions_bytes,
+        dynamic_tool_definitions,
+        dynamic_tool_bytes,
         turns,
         open_turn_ids: open_turns.iter().cloned().collect(),
         usage_events,
@@ -3727,7 +4005,7 @@ fn trace_mirror_sessions(index: &TraceIndex) -> Vec<TraceMirrorSession> {
                     completed_at_ms: turn.completed_at_ms,
                     duration_ms: turn.duration_ms,
                     structured_failures: turn.structured_failures,
-                    context_compactions: turn.compaction_events_ms.len(),
+                    context_compactions: turn.compaction_events.len(),
                 })
                 .collect();
             let tool_events = indexed
@@ -4190,6 +4468,141 @@ mod tests {
         assert!(serialized.contains("private reasoning summary"));
         assert!(serialized.contains("private tool result"));
         assert!(serialized.contains("private-key"));
+
+        fs::remove_dir_all(directory).expect("cleanup");
+    }
+
+    #[test]
+    fn reconstructs_context_compaction_and_explicit_memory_evidence() {
+        let directory = std::env::temp_dir().join(format!(
+            "codex-xray-context-trace-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&directory).expect("create temp directory");
+        let path = directory.join("session.jsonl");
+        let mut file = File::create(&path).expect("create fixture");
+        for line in [
+            r#"{"timestamp":"2026-07-30T10:00:00.000Z","type":"session_meta","payload":{"id":"context-session","cwd":"/tmp/context-project","source":"app","base_instructions":{"text":"base"},"dynamic_tools":[{"name":"exec_command"},{"name":"web.run"}]}}"#,
+            r#"{"timestamp":"2026-07-30T10:00:00.100Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-context","started_at":"2026-07-30T10:00:00.100Z"}}"#,
+            r#"{"timestamp":"2026-07-30T10:00:00.200Z","type":"turn_context","payload":{"turn_id":"turn-context","model":"gpt-5.6-sol","effort":"xhigh","summary":"auto"}}"#,
+            r#"{"timestamp":"2026-07-30T10:00:00.300Z","type":"world_state","payload":{"cwd":"/tmp/context-project","permissions":"read-write"}}"#,
+            r#"{"timestamp":"2026-07-30T10:00:00.400Z","type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"<memories>durable fact</memories>"}]}}"#,
+            r#"{"timestamp":"2026-07-30T10:00:01.000Z","type":"event_msg","payload":{"type":"token_count","info":{"model":"gpt-5.6-sol","model_context_window":258400,"last_token_usage":{"input_tokens":200000,"cached_input_tokens":150000,"output_tokens":500,"total_tokens":200500}}}}"#,
+            r#"{"timestamp":"2026-07-30T10:00:02.000Z","type":"compacted","payload":{"window_number":2,"replacement_history":[{"type":"compaction","encrypted_content":"ciphertext"},{"type":"message","role":"user","content":[{"type":"input_text","text":"retained"}]}]}}"#,
+            r#"{"timestamp":"2026-07-30T10:00:02.010Z","type":"event_msg","payload":{"type":"context_compacted"}}"#,
+            r#"{"timestamp":"2026-07-30T10:00:02.100Z","type":"event_msg","payload":{"type":"token_count","info":{"model":"gpt-5.6-sol","model_context_window":258400,"last_token_usage":{"input_tokens":100000,"cached_input_tokens":90000,"output_tokens":250,"total_tokens":100250}}}}"#,
+            r#"{"timestamp":"2026-07-30T10:00:02.200Z","type":"event_msg","payload":{"type":"agent_message","phase":"final_answer","message":"done","memory_citation":{"thread_id":"source-thread"}}}"#,
+            r#"{"timestamp":"2026-07-30T10:00:02.300Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-context","duration_ms":2200}}"#,
+        ] {
+            writeln!(file, "{line}").expect("write fixture");
+        }
+        drop(file);
+
+        let metadata = fs::metadata(&path).expect("metadata");
+        let indexed =
+            parse_trace_file(&path, metadata.len(), modified_millis(&metadata)).expect("parse");
+        let detail = summarize_session_detail(&indexed, 0, SystemTime::now());
+        let turn = detail.turns.first().expect("turn summary");
+        assert_eq!(turn.first_input_tokens, 200_000);
+        assert_eq!(turn.peak_input_tokens, 200_000);
+        assert_eq!(turn.last_input_tokens, 100_000);
+        assert_eq!(turn.model_passes, 2);
+        assert_eq!(turn.context_compactions, 1);
+        assert_eq!(turn.estimated_reclaimed_tokens, 100_000);
+        assert!(turn.local_context_bytes > 0);
+        assert!(turn.session_context_bytes > 0);
+        assert!(turn.developer_context_bytes > 0);
+        assert!(turn.world_state_bytes > 0);
+        assert!(turn.turn_context_bytes > 0);
+        assert!(turn.memory_context_bytes > 0);
+        assert_eq!(turn.memory_citations, 1);
+
+        let compaction = turn
+            .timeline
+            .iter()
+            .find(|event| event.kind == "compaction")
+            .expect("compaction event");
+        assert_eq!(compaction.source_order, 7);
+        assert_eq!(compaction.source_end_order, Some(8));
+        assert_eq!(compaction.sequence, Some(2));
+        assert_eq!(compaction.content_parts, 2);
+        assert_eq!(compaction.encrypted_bytes, 10);
+        assert_eq!(compaction.context_before_tokens, Some(200_000));
+        assert_eq!(compaction.context_after_tokens, Some(100_000));
+        assert_eq!(compaction.context_reclaimed_tokens, Some(100_000));
+        assert_eq!(detail.model_passes, 2);
+        assert_eq!(detail.estimated_reclaimed_tokens, 100_000);
+        assert!(detail.memory_context_bytes > 0);
+        assert_eq!(detail.memory_citations, 1);
+
+        fs::remove_dir_all(directory).expect("cleanup");
+    }
+
+    #[test]
+    fn parses_compaction_lines_larger_than_the_general_json_limit() {
+        let directory = std::env::temp_dir().join(format!(
+            "codex-xray-large-compaction-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&directory).expect("create temp directory");
+        let path = directory.join("session.jsonl");
+        let mut file = File::create(&path).expect("create fixture");
+        for line in [
+            r#"{"timestamp":"2026-07-30T10:00:00.000Z","type":"session_meta","payload":{"id":"large-compaction","cwd":"/tmp/project"}}"#,
+            r#"{"timestamp":"2026-07-30T10:00:00.100Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-large"}}"#,
+            r#"{"timestamp":"2026-07-30T10:00:00.200Z","type":"turn_context","payload":{"turn_id":"turn-large","model":"gpt-5.6-sol"}}"#,
+            r#"{"timestamp":"2026-07-30T10:00:01.000Z","type":"event_msg","payload":{"type":"token_count","info":{"model_context_window":258400,"last_token_usage":{"input_tokens":220000,"output_tokens":100,"total_tokens":220100}}}}"#,
+        ] {
+            writeln!(file, "{line}").expect("write fixture");
+        }
+        let oversized_history = "x".repeat(MAX_PARSED_LINE_BYTES + 1024);
+        let compacted = serde_json::json!({
+            "timestamp": "2026-07-30T10:00:02.000Z",
+            "type": "compacted",
+            "payload": {
+                "window_number": 9,
+                "replacement_history": [
+                    {"type": "compaction", "encrypted_content": "encrypted-summary"},
+                    {"type": "message", "content": [{"type": "input_text", "text": oversized_history}]}
+                ]
+            }
+        });
+        let compacted_line = serde_json::to_string(&compacted).expect("serialize compaction");
+        assert!(compacted_line.len() > MAX_PARSED_LINE_BYTES);
+        writeln!(file, "{compacted_line}").expect("write large compaction");
+        for line in [
+            r#"{"timestamp":"2026-07-30T10:00:02.010Z","type":"event_msg","payload":{"type":"context_compacted"}}"#,
+            r#"{"timestamp":"2026-07-30T10:00:02.100Z","type":"event_msg","payload":{"type":"token_count","info":{"model_context_window":258400,"last_token_usage":{"input_tokens":90000,"output_tokens":100,"total_tokens":90100}}}}"#,
+            r#"{"timestamp":"2026-07-30T10:00:02.200Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-large"}}"#,
+        ] {
+            writeln!(file, "{line}").expect("write fixture");
+        }
+        drop(file);
+
+        let metadata = fs::metadata(&path).expect("metadata");
+        let indexed =
+            parse_trace_file(&path, metadata.len(), modified_millis(&metadata)).expect("parse");
+        let detail = summarize_session_detail(&indexed, 0, SystemTime::now());
+        let turn = detail.turns.first().expect("turn summary");
+        assert_eq!(turn.context_compactions, 1);
+        assert_eq!(turn.estimated_reclaimed_tokens, 130_000);
+        let compaction = turn
+            .timeline
+            .iter()
+            .find(|event| event.kind == "compaction")
+            .expect("compaction event");
+        assert_eq!(compaction.sequence, Some(9));
+        assert_eq!(compaction.content_parts, 2);
+        assert_eq!(compaction.encrypted_bytes, 17);
+        assert_eq!(compaction.source_end_order, Some(6));
 
         fs::remove_dir_all(directory).expect("cleanup");
     }

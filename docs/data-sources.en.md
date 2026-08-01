@@ -42,7 +42,7 @@ Current Codex custom Providers use `wire_api = "responses"`. “OpenAI compatibl
 
 The installed Codex currently accepts `wire_api = "responses"` for custom Providers. For a Chat preset, X-Ray therefore writes a loopback Responses endpoint into Codex configuration and keeps the real vendor URL in X-Ray's non-secret bridge registry. Codex also requests a model catalog from that endpoint; X-Ray returns the configured model ID and context-window metadata so Codex can schedule compaction correctly.
 
-The bridge translates message text, streaming output, function definitions, tool requests, tool results, and usage counters. It intentionally drops Responses-only built-in tools and metadata that Chat Completions cannot represent, including native Web Search, encrypted reasoning, and server-side compaction. The main window can be closed because X-Ray remains in the system tray; quitting X-Ray stops the bridge.
+The bridge translates message text, streaming output, function definitions, tool requests, tool results, and usage counters. It intentionally drops Responses-only built-in tools and metadata that Chat Completions cannot represent, including native Web Search, encrypted reasoning, and server-side compaction. The bridge is available only while X-Ray is running; closing X-Ray stops it.
 
 ### Making an environment variable visible to Codex desktop
 

@@ -7,7 +7,6 @@ import {
   ChevronRight,
   Folder,
   MessageSquare,
-  Search,
 } from "lucide-react";
 import { Fragment, useMemo, useState } from "react";
 import {
@@ -17,6 +16,7 @@ import {
   formatReadableUsd,
 } from "./format";
 import type { Locale } from "./i18n";
+import SearchField from "./SearchField";
 import type {
   ProjectUsageConversation,
   ProjectUsageProject,
@@ -352,17 +352,22 @@ export default function ProjectUsageView({
           </span>
         </div>
         <div className="project-usage-tools">
-          <label className="project-usage-search">
-            <Search aria-hidden="true" />
-            <span className="sr-only">
-              {copy(locale, "搜索项目或对话", "Search projects or conversations")}
-            </span>
-            <input
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              placeholder={copy(locale, "搜索项目或对话", "Search project or conversation")}
-            />
-          </label>
+          <SearchField
+            className="project-usage-search"
+            value={query}
+            onChange={setQuery}
+            placeholder={copy(
+              locale,
+              "搜索项目或对话",
+              "Search project or conversation",
+            )}
+            ariaLabel={copy(
+              locale,
+              "搜索项目或对话",
+              "Search projects or conversations",
+            )}
+            clearLabel={copy(locale, "清除搜索", "Clear search")}
+          />
         </div>
       </header>
 

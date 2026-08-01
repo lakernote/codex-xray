@@ -75,7 +75,7 @@ Official quota and reset information, plus local token and API-equivalent cost l
 
 ### Execution trace
 
-Browse Sessions by project, conversation, and turn, then reconstruct each turn from user input through LLM responses, CLI/MCP/Skill calls, tool results, context changes, token accounting, and completion.
+Browse Sessions by project, conversation, and turn, then reconstruct each turn from user input through LLM responses, CLI/MCP/Skill calls, tool results, token accounting, and completion. Context analysis shows first, peak, and final model input; recorded compaction boundaries and estimated reduction; local preparation records; and explicit Memory usage evidence without treating compaction as long-term Memory.
 
 ### Providers and Codex configuration
 
@@ -83,7 +83,7 @@ Save multiple provider profiles with separate models, endpoints, protocols, and 
 
 ### Desktop tools
 
-Chinese and English interfaces, light and dark themes, system tray operation, signed in-app stable updates, version detection, and shortcuts to Codex configuration, Sessions, Skills, Plugins, and X-Ray's SQLite index.
+Chinese and English interfaces, light and dark themes, signed in-app stable updates, version detection, and shortcuts to Codex configuration, Sessions, Skills, Plugins, and X-Ray's SQLite index.
 
 ## How Chat providers connect to Codex
 
@@ -159,7 +159,7 @@ If `codex` is not on `PATH`, Codex X-Ray attempts to detect the CLI bundled with
 - A separate App Server cannot always observe every transient state inside another Codex App process. The UI distinguishes official states from local-event inference.
 - Codex App Server and Session formats may evolve; compatibility follows the locally installed version.
 - The Chat bridge translates text, streaming output, function tools, tool results, and token usage. Responses-only features such as native Web Search, encrypted reasoning, and server-side compaction are not translated.
-- Chat providers require Codex X-Ray to remain running. Closing the window hides it; on macOS, use the `X-Ray` menu-bar item to reopen the window or quit the app completely.
+- Chat providers require Codex X-Ray to remain running. Closing Codex X-Ray stops the local compatibility bridge.
 - The project is currently validated primarily on macOS. Release builds cover Windows, Linux, and macOS.
 
 ## License
