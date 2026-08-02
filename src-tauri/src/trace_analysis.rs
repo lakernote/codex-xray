@@ -18,7 +18,7 @@ use crate::storage::{
     TraceMirrorUsageEvent, read_index_entries, write_index_entries, write_trace_mirror,
 };
 
-const TRACE_INDEX_SCHEMA_VERSION: u32 = 13;
+const TRACE_INDEX_SCHEMA_VERSION: u32 = 14;
 const TRACE_INDEX_NAMESPACE: &str = "trace-files";
 const MAX_TRACE_FILES: usize = 240;
 const MAX_PARSED_LINE_BYTES: usize = 512 * 1024;
@@ -445,6 +445,29 @@ pub struct TraceSnapshot {
     pub totals: TraceTotals,
     pub sessions: Vec<TraceSessionSummary>,
     pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TraceSourceRecord {
+    pub line: usize,
+    pub timestamp: Option<String>,
+    pub record_type: String,
+    pub payload_type: Option<String>,
+    pub call_id: Option<String>,
+    pub bytes: u64,
+    pub truncated: bool,
+    pub json: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TraceSourcePage {
+    pub session_id: String,
+    pub session_path: String,
+    pub total_lines: usize,
+    pub offset: usize,
+    pub limit: usize,
+    pub next_offset: Option<usize>,
+    pub records: Vec<TraceSourceRecord>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1294,6 +1317,79 @@ fn find_trace_file_by_session_id(session_id: &str) -> Result<Option<PathBuf>, St
     Ok(None)
 }
 
+pub fn read_trace_source_page(
+    session_id: &str,
+    offset: usize,
+    limit: usize,
+) -> Result<TraceSourcePage, String> {
+    if session_id.is_empty()
+        || !session_id
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '-')
+    {
+        return Err("Session ID 格式无效".to_string());
+    }
+    let path = find_trace_file_by_session_id(session_id)?
+        .ok_or_else(|| format!("找不到 Session {session_id} 的源记录"))?;
+    let file =
+        File::open(&path).map_err(|error| format!("无法读取 {}: {error}", path.display()))?;
+    let limit = limit.clamp(1, 100);
+    let mut total_lines = 0usize;
+    let mut records = Vec::new();
+    for (index, line) in BufReader::new(file).lines().enumerate() {
+        let line =
+            line.map_err(|error| format!("读取 Session 第 {} 行失败：{error}", index + 1))?;
+        total_lines = index + 1;
+        if index < offset || records.len() >= limit {
+            continue;
+        }
+        let bytes = line.len() as u64;
+        let parsed = serde_json::from_str::<Value>(&line).ok();
+        let rendered = parsed
+            .as_ref()
+            .and_then(|value| serde_json::to_string_pretty(value).ok())
+            .unwrap_or_else(|| line.clone());
+        let json = truncate_text(&rendered, MAX_TRACE_DETAIL_CHARS);
+        records.push(TraceSourceRecord {
+            line: index + 1,
+            timestamp: parsed
+                .as_ref()
+                .and_then(|value| value.get("timestamp"))
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            record_type: parsed
+                .as_ref()
+                .and_then(|value| value.get("type"))
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+                .to_string(),
+            payload_type: parsed
+                .as_ref()
+                .and_then(|value| value.pointer("/payload/type"))
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            call_id: parsed
+                .as_ref()
+                .and_then(|value| value.pointer("/payload/call_id"))
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            bytes,
+            truncated: json.len() < rendered.len(),
+            json,
+        });
+    }
+    let next_offset = (offset + records.len() < total_lines).then_some(offset + records.len());
+    Ok(TraceSourcePage {
+        session_id: session_id.to_string(),
+        session_path: path.to_string_lossy().to_string(),
+        total_lines,
+        offset,
+        limit,
+        next_offset,
+        records,
+    })
+}
+
 fn find_trace_file_in_directory(
     directory: &Path,
     session_id: &str,
@@ -1728,7 +1824,11 @@ fn summarize_turn(
                 .to_string(),
                 sequence: None,
                 call_id: event.call_id.clone(),
-                source_type: Some(format!("response_item.{}", event.source_type)),
+                source_type: Some(if event.source_type.contains('.') {
+                    event.source_type.clone()
+                } else {
+                    format!("response_item.{}", event.source_type)
+                }),
                 execution_end_source_type: None,
                 result_source_type: None,
                 server: event.server.clone(),
@@ -2813,25 +2913,108 @@ fn parse_trace_file(
                 .unwrap_or(&current_turn)
                 .to_string();
             let turn = turns.entry(turn_id.clone()).or_default();
-            turn.id = turn_id;
+            turn.id = turn_id.clone();
             turn.model = current_model.clone();
             turn.structured_failures += 1;
             continue;
         }
-        if entry_type == "event_msg"
-            && payload_type == "mcp_tool_call_end"
-            && payload.pointer("/result/isError").and_then(Value::as_bool) == Some(true)
-        {
-            failed_tool_calls += 1;
+        if entry_type == "event_msg" && payload_type == "mcp_tool_call_end" {
             let turn_id = payload
                 .get("turn_id")
                 .and_then(Value::as_str)
                 .unwrap_or(&current_turn)
                 .to_string();
+            let invocation = payload.get("invocation").unwrap_or(&Value::Null);
+            let server = invocation
+                .get("server")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let tool = invocation
+                .get("tool")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let input = invocation.get("arguments").cloned().unwrap_or(Value::Null);
+            let tool_name = format!("mcp__{server}.{tool}");
+            let namespace = format!("mcp__{server}");
+            let presentation = describe_tool_call(tool, Some(&namespace), &input);
+            let result_container = payload.get("result").unwrap_or(&Value::Null);
+            let result = result_container
+                .get("Ok")
+                .or_else(|| result_container.get("Err"))
+                .unwrap_or(result_container);
+            let failed = result_container.get("Err").is_some()
+                || result.pointer("/isError").and_then(Value::as_bool) == Some(true)
+                || result.pointer("/is_error").and_then(Value::as_bool) == Some(true);
+            if failed {
+                failed_tool_calls += 1;
+            }
+            tool_calls += 1;
+            *tool_counts.entry(tool_name.clone()).or_default() += 1;
+            let signature = call_signature(&tool_name, &input);
+            let previous_calls = *call_counts.get(&signature).unwrap_or(&0);
+            *call_counts.entry(signature.clone()).or_default() += 1;
+            let completed_at_ms = timestamp
+                .as_deref()
+                .and_then(timestamp_millis)
+                .unwrap_or_default();
+            let duration_ms = payload
+                .get("duration")
+                .and_then(Value::as_object)
+                .map(|duration| {
+                    duration
+                        .get("secs")
+                        .and_then(Value::as_u64)
+                        .unwrap_or_default()
+                        .saturating_mul(1_000)
+                        .saturating_add(
+                            duration
+                                .get("nanos")
+                                .and_then(Value::as_u64)
+                                .unwrap_or_default()
+                                / 1_000_000,
+                        )
+                })
+                .unwrap_or_default();
+            let timestamp_ms = completed_at_ms.saturating_sub(duration_ms as i64);
+            let output_bytes = serialized_value_bytes(result);
             let turn = turns.entry(turn_id.clone()).or_default();
-            turn.id = turn_id;
+            turn.id = turn_id.clone();
             turn.model = current_model.clone();
-            turn.structured_failures += 1;
+            turn.structured_failures += usize::from(failed);
+            turn.tool_events.push(TraceToolEvent {
+                // Codex stores the MCP invocation, elapsed time, and result in this
+                // one structured line. The semantic start time is reconstructed from
+                // the recorded duration; all three stages still point to the same
+                // source line so the UI never pretends separate records existed.
+                source_order,
+                completed_source_order: Some(source_order),
+                execution_completed_source_order: Some(source_order),
+                timestamp_ms,
+                completed_at_ms: Some(completed_at_ms),
+                execution_completed_at_ms: Some(completed_at_ms),
+                turn_id,
+                call_id: payload
+                    .get("call_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                source_type: "event_msg.mcp_tool_call_end".to_string(),
+                execution_end_source_type: Some("event_msg.mcp_tool_call_end".to_string()),
+                result_source_type: Some("event_msg.mcp_tool_call_end".to_string()),
+                name: tool.to_string(),
+                category: presentation.category,
+                server: presentation.server,
+                subject: presentation.subject,
+                detail: presentation.detail,
+                arguments: presentation.arguments,
+                arguments_json: trace_detail_json(&input),
+                result_fields: extract_result_fields(result),
+                result_json: trace_detail_json(result),
+                signature,
+                repeated: previous_calls > 0,
+                failed,
+                output_bytes,
+                exit_code: extract_exit_code(result),
+            });
             continue;
         }
         if entry_type == "event_msg" && payload_type == "token_count" {
@@ -3675,7 +3858,10 @@ fn extract_skill_reference(value: &str) -> Option<(String, String)> {
 }
 
 fn extract_nested_tools(value: &str) -> Vec<String> {
-    let mut tools = BTreeSet::new();
+    // Preserve source order and duplicate calls. A single Codex `exec` wrapper can
+    // contain several calls to the same MCP method, and those occurrences are
+    // distinct operations in the execution trace.
+    let mut tools = Vec::new();
     let mut remaining = value;
     while let Some(index) = remaining.find("tools.") {
         let suffix = &remaining[index + "tools.".len()..];
@@ -3685,11 +3871,11 @@ fn extract_nested_tools(value: &str) -> Vec<String> {
             .collect::<String>();
         let name_length = name.len();
         if !name.is_empty() {
-            tools.insert(name);
+            tools.push(name);
         }
         remaining = &suffix[name_length..];
     }
-    tools.into_iter().take(12).collect()
+    tools
 }
 
 fn extract_exit_code(value: &Value) -> Option<i64> {
@@ -4176,6 +4362,35 @@ mod tests {
     use std::io::Write;
 
     #[test]
+    fn source_page_serialization_matches_frontend_contract() {
+        let page = TraceSourcePage {
+            session_id: "session-1".to_string(),
+            session_path: "/tmp/session-1.jsonl".to_string(),
+            total_lines: 3,
+            offset: 0,
+            limit: 2,
+            next_offset: Some(2),
+            records: vec![TraceSourceRecord {
+                line: 1,
+                timestamp: Some("2026-08-02T10:00:00Z".to_string()),
+                record_type: "event_msg".to_string(),
+                payload_type: Some("user_message".to_string()),
+                call_id: None,
+                bytes: 42,
+                truncated: false,
+                json: "{}".to_string(),
+            }],
+        };
+
+        let value = serde_json::to_value(page).expect("serialize source page");
+        assert_eq!(value["next_offset"], 2);
+        assert_eq!(value["records"][0]["line"], 1);
+        assert_eq!(value["records"][0]["record_type"], "event_msg");
+        assert!(value["records"][0].get("line_number").is_none());
+        assert!(value["records"][0].get("entry_type").is_none());
+    }
+
+    #[test]
     fn extracts_repeated_read_paths_without_command_content() {
         let input = Value::String(
             r#"{"cmd":"sed -n '1,20p' src/App.tsx && rg usage src/App.tsx","workdir":"/tmp/codex-xray"}"#
@@ -4246,6 +4461,15 @@ mod tests {
         assert_eq!(
             extract_nested_tools("await tools.exec_command({}); await tools.web__run({});"),
             vec!["exec_command".to_string(), "web__run".to_string()]
+        );
+        assert_eq!(
+            extract_nested_tools(
+                "await tools.mcp__aiops_pilot__query_logs({}); await tools.mcp__aiops_pilot__query_logs({});"
+            ),
+            vec![
+                "mcp__aiops_pilot__query_logs".to_string(),
+                "mcp__aiops_pilot__query_logs".to_string(),
+            ]
         );
         assert_eq!(
             extract_exit_code(&Value::String(
@@ -4711,6 +4935,69 @@ mod tests {
             Some("2026-07-28T10:59:50.700+00:00")
         );
         assert_eq!(result.duration_ms, Some(9));
+
+        fs::remove_dir_all(directory).expect("cleanup");
+    }
+
+    #[test]
+    fn reconstructs_successful_mcp_execution_from_completion_record() {
+        let directory = std::env::temp_dir().join(format!(
+            "codex-xray-mcp-trace-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&directory).expect("create temp directory");
+        let path = directory.join("session.jsonl");
+        let mut file = File::create(&path).expect("create fixture");
+        for line in [
+            r#"{"timestamp":"2026-08-01T10:00:00.000Z","type":"session_meta","payload":{"id":"mcp-session","cwd":"/tmp/project"}}"#,
+            r#"{"timestamp":"2026-08-01T10:00:00.100Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-mcp"}}"#,
+            r#"{"timestamp":"2026-08-01T10:00:00.200Z","type":"turn_context","payload":{"turn_id":"turn-mcp","model":"gpt-5.6-sol"}}"#,
+            r#"{"timestamp":"2026-08-01T10:00:03.750Z","type":"event_msg","payload":{"type":"mcp_tool_call_end","turn_id":"turn-mcp","call_id":"exec-42","invocation":{"server":"aiops-pilot","tool":"query_logs","arguments":{"service":"gateway","limit":20}},"duration":{"secs":2,"nanos":500000000},"result":{"Ok":{"content":[{"type":"text","text":"two matching log lines"}],"isError":false}}}}"#,
+            r#"{"timestamp":"2026-08-01T10:00:04.000Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-mcp"}}"#,
+        ] {
+            writeln!(file, "{line}").expect("write fixture");
+        }
+        drop(file);
+
+        let metadata = fs::metadata(&path).expect("metadata");
+        let indexed =
+            parse_trace_file(&path, metadata.len(), modified_millis(&metadata)).expect("parse");
+        let detail = summarize_session_detail(&indexed, 0, SystemTime::now());
+        let turn = detail.turns.first().expect("turn summary");
+        assert_eq!(turn.tool_calls, 1);
+        assert_eq!(turn.failed_tool_calls, 0);
+        let stages = turn
+            .timeline
+            .iter()
+            .filter(|event| event.call_id.as_deref() == Some("exec-42"))
+            .collect::<Vec<_>>();
+        assert_eq!(stages.len(), 3);
+        assert_eq!(
+            stages
+                .iter()
+                .map(|event| event.kind.as_str())
+                .collect::<Vec<_>>(),
+            vec!["tool_request", "tool_execution", "tool_result"]
+        );
+        assert!(stages.iter().all(|event| event.source_order == 4));
+        assert!(
+            stages.iter().all(|event| {
+                event.source_type.as_deref() == Some("event_msg.mcp_tool_call_end")
+            })
+        );
+        assert_eq!(stages[0].server.as_deref(), Some("aiops-pilot"));
+        assert_eq!(stages[0].label, "query_logs");
+        assert_eq!(stages[1].duration_ms, Some(2_500));
+        assert!(
+            stages[2]
+                .result_json
+                .as_deref()
+                .is_some_and(|value| value.contains("two matching log lines"))
+        );
 
         fs::remove_dir_all(directory).expect("cleanup");
     }

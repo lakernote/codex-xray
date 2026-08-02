@@ -755,3 +755,43 @@ export type TraceSessionDetail = {
   turns: TraceTurnSummary[];
   tools: TraceToolAggregate[];
 };
+
+export type TraceSourceRecord = {
+  line: number;
+  timestamp: string | null;
+  record_type: string;
+  payload_type: string | null;
+  call_id: string | null;
+  bytes: number;
+  truncated: boolean;
+  json: string;
+};
+
+export type TraceSourcePage = {
+  session_id: string;
+  session_path: string;
+  offset: number;
+  next_offset: number | null;
+  total_lines: number;
+  records: TraceSourceRecord[];
+};
+
+export type ProtocolFrame = {
+  sequence: number;
+  captured_at: string;
+  channel: "app_server" | "provider_wire" | string;
+  direction: string;
+  kind: string;
+  method: string | null;
+  correlation_id: string | null;
+  status: number | null;
+  duration_ms: number | null;
+  bytes: number;
+  truncated: boolean;
+  body: string;
+};
+
+export type ProtocolCaptureSnapshot = {
+  generated_at: string;
+  frames: ProtocolFrame[];
+};

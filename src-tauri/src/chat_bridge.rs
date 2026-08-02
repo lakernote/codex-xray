@@ -4,7 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use async_stream::stream;
 use axum::body::{Body, Bytes};
@@ -18,6 +18,7 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
+use crate::protocol_capture::{ProtocolRecord, new_correlation_id, record_json, record_text};
 use crate::provider::read_file_credential;
 
 pub const CHAT_BRIDGE_PORT: u16 = 32_198;
@@ -326,11 +327,51 @@ async fn responses(
             format!("Chat 兼容桥中没有 Provider {provider_id}。"),
         );
     };
+    let correlation_id = new_correlation_id("provider");
+    record_json(
+        ProtocolRecord {
+            channel: "provider_wire",
+            direction: "codex_to_bridge",
+            kind: "request",
+            method: Some("POST /responses"),
+            correlation_id: Some(&correlation_id),
+            status: None,
+            duration_ms: None,
+        },
+        &request,
+    );
     let chat_request = match responses_to_chat(&request) {
         Ok(request) => request,
-        Err(error) => return json_error(StatusCode::BAD_REQUEST, error),
+        Err(error) => {
+            record_text(
+                ProtocolRecord {
+                    channel: "provider_wire",
+                    direction: "bridge_to_codex",
+                    kind: "error",
+                    method: Some("Responses -> Chat conversion"),
+                    correlation_id: Some(&correlation_id),
+                    status: Some(StatusCode::BAD_REQUEST.as_u16()),
+                    duration_ms: None,
+                },
+                &error,
+            );
+            return json_error(StatusCode::BAD_REQUEST, error);
+        }
     };
     let endpoint = chat_endpoint(&provider.upstream_base_url);
+    let upstream_method = format!("POST {endpoint}");
+    record_json(
+        ProtocolRecord {
+            channel: "provider_wire",
+            direction: "bridge_to_upstream",
+            kind: "request",
+            method: Some(&upstream_method),
+            correlation_id: Some(&correlation_id),
+            status: None,
+            duration_ms: None,
+        },
+        &chat_request,
+    );
     let mut upstream = state
         .client
         .post(&endpoint)
@@ -340,11 +381,38 @@ async fn responses(
     match bridge_credential(&provider_id, &provider, &headers).await {
         Ok(Some(credential)) => upstream = upstream.bearer_auth(credential),
         Ok(None) => {}
-        Err(error) => return json_error(StatusCode::UNAUTHORIZED, error),
+        Err(error) => {
+            record_text(
+                ProtocolRecord {
+                    channel: "provider_wire",
+                    direction: "bridge_to_codex",
+                    kind: "error",
+                    method: Some("Resolve provider credential"),
+                    correlation_id: Some(&correlation_id),
+                    status: Some(StatusCode::UNAUTHORIZED.as_u16()),
+                    duration_ms: None,
+                },
+                &error,
+            );
+            return json_error(StatusCode::UNAUTHORIZED, error);
+        }
     }
+    let upstream_started = Instant::now();
     let upstream = match upstream.send().await {
         Ok(response) => response,
         Err(error) => {
+            record_text(
+                ProtocolRecord {
+                    channel: "provider_wire",
+                    direction: "upstream_to_bridge",
+                    kind: "error",
+                    method: Some(&upstream_method),
+                    correlation_id: Some(&correlation_id),
+                    status: None,
+                    duration_ms: Some(upstream_started.elapsed().as_millis() as u64),
+                },
+                &error.to_string(),
+            );
             return json_error(
                 StatusCode::BAD_GATEWAY,
                 format!("Chat 上游连接失败：{error}"),
@@ -352,11 +420,24 @@ async fn responses(
         }
     };
     let status = upstream.status();
+    let upstream_latency_ms = upstream_started.elapsed().as_millis() as u64;
     if !status.is_success() {
         let body = upstream
             .text()
             .await
             .unwrap_or_else(|error| format!("无法读取上游错误：{error}"));
+        record_text(
+            ProtocolRecord {
+                channel: "provider_wire",
+                direction: "upstream_to_bridge",
+                kind: "error",
+                method: Some(&upstream_method),
+                correlation_id: Some(&correlation_id),
+                status: Some(status.as_u16()),
+                duration_ms: Some(upstream_latency_ms),
+            },
+            &body,
+        );
         if upstream_message_too_large(&body) {
             return json_error(
                 StatusCode::PAYLOAD_TOO_LARGE,
@@ -385,51 +466,202 @@ async fn responses(
     if !content_type.contains("text/event-stream") {
         return match upstream.json::<Value>().await {
             Ok(response) => {
+                record_json(
+                    ProtocolRecord {
+                        channel: "provider_wire",
+                        direction: "upstream_to_bridge",
+                        kind: "response",
+                        method: Some(&upstream_method),
+                        correlation_id: Some(&correlation_id),
+                        status: Some(status.as_u16()),
+                        duration_ms: Some(upstream_latency_ms),
+                    },
+                    &response,
+                );
                 let mut stream = ResponseStream::new(model);
                 let mut frames = stream.start();
                 frames.extend(stream.consume_chat_response(&response));
                 frames.extend(stream.finish());
-                sse_response(Body::from(frames.concat()))
+                let body = frames.concat();
+                record_text(
+                    ProtocolRecord {
+                        channel: "provider_wire",
+                        direction: "bridge_to_codex",
+                        kind: "response",
+                        method: Some("Responses SSE"),
+                        correlation_id: Some(&correlation_id),
+                        status: Some(StatusCode::OK.as_u16()),
+                        duration_ms: None,
+                    },
+                    &body,
+                );
+                sse_response(Body::from(body))
             }
-            Err(error) => json_error(
-                StatusCode::BAD_GATEWAY,
-                format!("Chat 上游没有返回有效 JSON：{error}"),
-            ),
+            Err(error) => {
+                record_text(
+                    ProtocolRecord {
+                        channel: "provider_wire",
+                        direction: "upstream_to_bridge",
+                        kind: "error",
+                        method: Some(&upstream_method),
+                        correlation_id: Some(&correlation_id),
+                        status: Some(status.as_u16()),
+                        duration_ms: Some(upstream_latency_ms),
+                    },
+                    &error.to_string(),
+                );
+                json_error(
+                    StatusCode::BAD_GATEWAY,
+                    format!("Chat 上游没有返回有效 JSON：{error}"),
+                )
+            }
         };
     }
 
+    record_text(
+        ProtocolRecord {
+            channel: "provider_wire",
+            direction: "upstream_to_bridge",
+            kind: "stream_start",
+            method: Some(&upstream_method),
+            correlation_id: Some(&correlation_id),
+            status: Some(status.as_u16()),
+            duration_ms: Some(upstream_latency_ms),
+        },
+        "text/event-stream",
+    );
     let output = stream! {
         let mut events = upstream.bytes_stream().eventsource();
         let mut response_stream = ResponseStream::new(model);
-        for frame in response_stream.start() {
+        let start_frames = response_stream.start();
+        let start_body = start_frames.concat();
+        if !start_body.is_empty() {
+            record_text(
+                ProtocolRecord {
+                    channel: "provider_wire",
+                    direction: "bridge_to_codex",
+                    kind: "stream_event",
+                    method: Some("Responses SSE start"),
+                    correlation_id: Some(&correlation_id),
+                    status: Some(StatusCode::OK.as_u16()),
+                    duration_ms: None,
+                },
+                &start_body,
+            );
+        }
+        for frame in start_frames {
             yield Ok::<Bytes, Infallible>(Bytes::from(frame));
         }
         let mut finished = false;
         while let Some(event) = events.next().await {
             match event {
                 Ok(event) if event.data.trim() == "[DONE]" => {
-                    for frame in response_stream.finish() {
+                    record_text(
+                        ProtocolRecord {
+                            channel: "provider_wire",
+                            direction: "upstream_to_bridge",
+                            kind: "stream_event",
+                            method: Some(&upstream_method),
+                            correlation_id: Some(&correlation_id),
+                            status: Some(status.as_u16()),
+                            duration_ms: None,
+                        },
+                        "[DONE]",
+                    );
+                    let frames = response_stream.finish();
+                    let finish_body = frames.concat();
+                    if !finish_body.is_empty() {
+                        record_text(
+                            ProtocolRecord {
+                                channel: "provider_wire",
+                                direction: "bridge_to_codex",
+                                kind: "stream_event",
+                                method: Some("Responses SSE finish"),
+                                correlation_id: Some(&correlation_id),
+                                status: Some(StatusCode::OK.as_u16()),
+                                duration_ms: None,
+                            },
+                            &finish_body,
+                        );
+                    }
+                    for frame in frames {
                         yield Ok(Bytes::from(frame));
                     }
                     finished = true;
                     break;
                 }
-                Ok(event) => match serde_json::from_str::<Value>(&event.data) {
+                Ok(event) => {
+                    record_text(
+                        ProtocolRecord {
+                            channel: "provider_wire",
+                            direction: "upstream_to_bridge",
+                            kind: "stream_event",
+                            method: Some(&upstream_method),
+                            correlation_id: Some(&correlation_id),
+                            status: Some(status.as_u16()),
+                            duration_ms: None,
+                        },
+                        &event.data,
+                    );
+                    match serde_json::from_str::<Value>(&event.data) {
                     Ok(chunk) => {
-                        for frame in response_stream.consume_chat_chunk(&chunk) {
+                        let frames = response_stream.consume_chat_chunk(&chunk);
+                        let delta_body = frames.concat();
+                        if !delta_body.is_empty() {
+                            record_text(
+                                ProtocolRecord {
+                                    channel: "provider_wire",
+                                    direction: "bridge_to_codex",
+                                    kind: "stream_event",
+                                    method: Some("Responses SSE delta"),
+                                    correlation_id: Some(&correlation_id),
+                                    status: Some(StatusCode::OK.as_u16()),
+                                    duration_ms: None,
+                                },
+                                &delta_body,
+                            );
+                        }
+                        for frame in frames {
                             yield Ok(Bytes::from(frame));
                         }
                     }
                     Err(error) => {
-                        for frame in response_stream.fail(format!("Chat 流事件无法解析：{error}")) {
+                        let frames = response_stream.fail(format!("Chat 流事件无法解析：{error}"));
+                        record_text(
+                            ProtocolRecord {
+                                channel: "provider_wire",
+                                direction: "bridge_to_codex",
+                                kind: "error",
+                                method: Some("Responses SSE conversion"),
+                                correlation_id: Some(&correlation_id),
+                                status: Some(StatusCode::BAD_GATEWAY.as_u16()),
+                                duration_ms: None,
+                            },
+                            &frames.concat(),
+                        );
+                        for frame in frames {
                             yield Ok(Bytes::from(frame));
                         }
                         finished = true;
                         break;
                     }
+                }
                 },
                 Err(error) => {
-                    for frame in response_stream.fail(format!("Chat 流已中断：{error}")) {
+                    let frames = response_stream.fail(format!("Chat 流已中断：{error}"));
+                    record_text(
+                        ProtocolRecord {
+                            channel: "provider_wire",
+                            direction: "upstream_to_bridge",
+                            kind: "error",
+                            method: Some(&upstream_method),
+                            correlation_id: Some(&correlation_id),
+                            status: Some(status.as_u16()),
+                            duration_ms: None,
+                        },
+                        &error.to_string(),
+                    );
+                    for frame in frames {
                         yield Ok(Bytes::from(frame));
                     }
                     finished = true;
@@ -438,7 +670,23 @@ async fn responses(
             }
         }
         if !finished {
-            for frame in response_stream.finish() {
+            let frames = response_stream.finish();
+            let finish_body = frames.concat();
+            if !finish_body.is_empty() {
+                record_text(
+                    ProtocolRecord {
+                        channel: "provider_wire",
+                        direction: "bridge_to_codex",
+                        kind: "stream_event",
+                        method: Some("Responses SSE finish"),
+                        correlation_id: Some(&correlation_id),
+                        status: Some(StatusCode::OK.as_u16()),
+                        duration_ms: None,
+                    },
+                    &finish_body,
+                );
+            }
+            for frame in frames {
                 yield Ok(Bytes::from(frame));
             }
         }

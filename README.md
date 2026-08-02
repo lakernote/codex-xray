@@ -77,6 +77,8 @@ Official quota and reset information, plus local token and API-equivalent cost l
 
 Browse Sessions by project, conversation, and turn, then reconstruct each turn from user input through LLM responses, CLI/MCP/Skill calls, tool results, token accounting, and completion. Context analysis shows first, peak, and final model input; recorded compaction boundaries and estimated reduction; local preparation records; and explicit Memory usage evidence without treating compaction as long-term Memory.
 
+The raw-record view lets you verify a Timeline against its source JSONL line by line without analyzing the conversation first. It also exposes X-Ray's own App Server messages and the full Responses → Chat → Responses flow when a request crosses the Chat compatibility bridge. Native provider HTTP traffic goes directly from Codex to that provider and is therefore not presented as captured traffic.
+
 ### Providers and Codex configuration
 
 Save multiple provider profiles with separate models, endpoints, protocols, and credentials, then switch among them with one click. Native Responses providers connect directly; OpenAI-compatible Chat providers use the local compatibility bridge. Common Codex settings are also available in the GUI, and every active-provider change keeps a recoverable previous state.

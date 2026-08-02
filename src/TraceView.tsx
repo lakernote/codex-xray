@@ -1,16 +1,25 @@
 import { invoke } from "@tauri-apps/api/core";
 import {
+  Bot,
+  Boxes,
+  ChevronDown,
   ChevronRight,
   CircleHelp,
+  FileText,
   Folder,
   FolderOpen,
+  Globe2,
   LoaderCircle,
   MessageSquareText,
+  Network,
   PanelLeftClose,
   PanelLeftOpen,
   RefreshCw,
   RotateCcw,
   ScanSearch,
+  Sparkles,
+  Terminal,
+  Wrench,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -22,6 +31,7 @@ import {
 } from "./format";
 import type { Locale, Translator } from "./i18n";
 import SearchField from "./SearchField";
+import TraceProtocolInspector from "./TraceProtocolInspector";
 import type {
   TraceSessionDetail,
   TraceSessionSummary,
@@ -64,8 +74,7 @@ type BatchConfirmation = {
   candidates: TraceSessionSummary[];
 };
 
-const TRACE_NAVIGATOR_COLLAPSED_KEY =
-  "codex-xray.trace-navigator-collapsed.v1";
+const TRACE_NAVIGATOR_COLLAPSED_KEY = "codex-xray.trace-navigator-collapsed.v1";
 const TRACE_SELECTED_SESSION_KEY = "codex-xray.trace-selected-session.v1";
 const TRACE_TARGET_SESSION_KEY = "codex-xray.trace-target-session.v1";
 const TRACE_TARGET_TURN_KEY = "codex-xray.trace-target-turn.v1";
@@ -141,7 +150,9 @@ function formatBytes(value: number, locale: Locale): string {
   const megabytes = value >= 1024 * 1024;
   return `${new Intl.NumberFormat(locale, {
     maximumFractionDigits: 1,
-  }).format(value / (megabytes ? 1024 * 1024 : 1024))} ${megabytes ? "MB" : "KB"}`;
+  }).format(
+    value / (megabytes ? 1024 * 1024 : 1024),
+  )} ${megabytes ? "MB" : "KB"}`;
 }
 
 function formatEventDuration(value: number, locale: Locale): string {
@@ -175,7 +186,8 @@ function conversationLabel(
   session: TraceSessionSummary,
   locale: Locale,
 ): string {
-  if (session.conversation_name?.trim()) return session.conversation_name.trim();
+  if (session.conversation_name?.trim())
+    return session.conversation_name.trim();
   return copy(
     locale,
     `${formatDateTime(session.started_at ?? session.updated_at, locale)} 的对话`,
@@ -309,10 +321,7 @@ function isHostedWebTool(event: TraceTimelineEvent): boolean {
   );
 }
 
-function toolRuntimeLabel(
-  event: TraceTimelineEvent,
-  locale: Locale,
-): string {
+function toolRuntimeLabel(event: TraceTimelineEvent, locale: Locale): string {
   if (isHostedWebTool(event)) {
     return copy(locale, "Codex Web 工具", "Codex Web tool");
   }
@@ -341,11 +350,20 @@ type EventFilter =
   | "input"
   | "model"
   | "tools"
+  | "mcp"
+  | "cli"
+  | "skill"
+  | "browser"
+  | "file"
+  | "agent"
+  | "other_tools"
   | "usage"
   | "lifecycle"
   | "context";
 
-const eventFilters: EventFilter[] = [
+type TraceExecutionView = "timeline" | "tools" | "protocol";
+
+const primaryEventFilters: EventFilter[] = [
   "all",
   "input",
   "model",
@@ -355,11 +373,575 @@ const eventFilters: EventFilter[] = [
   "context",
 ];
 
+const toolEventFilters: EventFilter[] = [
+  "tools",
+  "mcp",
+  "cli",
+  "skill",
+  "browser",
+  "file",
+  "agent",
+  "other_tools",
+];
+
+const allEventFilters: EventFilter[] = [
+  ...primaryEventFilters,
+  ...toolEventFilters.filter((filter) => filter !== "tools"),
+];
+
+function isToolEventFilter(filter: EventFilter): boolean {
+  return toolEventFilters.includes(filter);
+}
+
 function isToolTimelineEvent(event: TraceTimelineEvent): boolean {
   return (
     event.kind === "tool_request" ||
     event.kind === "tool_execution" ||
     event.kind === "tool_result"
+  );
+}
+
+type ToolCallBundle = {
+  key: string;
+  request: TraceTimelineEvent | null;
+  execution: TraceTimelineEvent | null;
+  result: TraceTimelineEvent | null;
+  sourceOrder: number;
+};
+
+type ToolUsageItem = {
+  key: string;
+  name: string;
+  action: string;
+  calls: number;
+  failures: number;
+  durationMs: number;
+  outputBytes: number;
+  subjects: string[];
+};
+
+type ToolUsageGroup = {
+  key: string;
+  kind: "mcp" | "cli" | "skill" | "builtin";
+  name: string;
+  calls: number;
+  failures: number;
+  tools: ToolUsageItem[];
+};
+
+function bundleToolCalls(events: TraceTimelineEvent[]): ToolCallBundle[] {
+  const bundles = new Map<string, ToolCallBundle>();
+  const anonymousBundles = new Map<string, ToolCallBundle[]>();
+  let anonymousSequence = 0;
+
+  for (const event of [...events].sort(
+    (left, right) => left.source_order - right.source_order,
+  )) {
+    if (!isToolTimelineEvent(event)) continue;
+    let current: ToolCallBundle | undefined;
+    if (event.call_id) {
+      current = bundles.get(`call:${event.call_id}`);
+    } else {
+      const signature = [event.category, event.server, event.label].join(":");
+      const candidates = anonymousBundles.get(signature) ?? [];
+      if (event.kind === "tool_execution") {
+        current = candidates.find((call) => call.execution == null);
+      } else if (event.kind === "tool_result") {
+        current = candidates.find((call) => call.result == null);
+      }
+      if (!current) {
+        const key = `anonymous:${signature}:${anonymousSequence++}`;
+        current = {
+          key,
+          request: null,
+          execution: null,
+          result: null,
+          sourceOrder: event.source_order,
+        };
+        candidates.push(current);
+        anonymousBundles.set(signature, candidates);
+        bundles.set(key, current);
+      }
+    }
+    if (!current) {
+      const key = `call:${event.call_id}`;
+      current = {
+        key,
+        request: null,
+        execution: null,
+        result: null,
+        sourceOrder: event.source_order,
+      };
+      bundles.set(key, current);
+    }
+    current.sourceOrder = Math.min(current.sourceOrder, event.source_order);
+    if (event.kind === "tool_request") current.request = event;
+    if (event.kind === "tool_execution") current.execution = event;
+    if (event.kind === "tool_result") current.result = event;
+    bundles.set(current.key, current);
+  }
+
+  return [...bundles.values()].sort(
+    (left, right) => left.sourceOrder - right.sourceOrder,
+  );
+}
+
+function primaryToolEvent(call: ToolCallBundle): TraceTimelineEvent {
+  const event = call.request ?? call.execution ?? call.result;
+  if (!event) throw new Error("Tool call bundle has no events");
+  return event;
+}
+
+function nestedToolNames(event: TraceTimelineEvent): string[] {
+  // Newer Codex builds batch several `tools.*` operations inside one
+  // custom_tool_call named `exec`. Prefer the original arguments because older
+  // X-Ray indexes stored only a de-duplicated preview in `nested_tools`.
+  const source = event.arguments_json ?? "";
+  const names = [...source.matchAll(/tools\.([A-Za-z0-9_]+)/g)].map(
+    (match) => match[1],
+  );
+  if (names.length > 0) return names;
+  const field = event.arguments.find(
+    (argument) => argument.key === "nested_tools",
+  );
+  return (field?.value ?? "")
+    .split(",")
+    .map((name) => name.trim())
+    .filter(Boolean);
+}
+
+function nestedToolDisplayName(name: string): string {
+  if (name.startsWith("mcp__")) {
+    const [server, ...tool] = name.slice("mcp__".length).split("__");
+    return tool.length > 0 ? `${server}.${tool.join(".")}` : server;
+  }
+  return name.replaceAll("__", ".");
+}
+
+function nestedToolSummary(
+  names: string[],
+): Array<{ name: string; calls: number }> {
+  const summary = new Map<string, number>();
+  for (const name of names) summary.set(name, (summary.get(name) ?? 0) + 1);
+  return [...summary].map(([name, calls]) => ({ name, calls }));
+}
+
+function semanticNestedToolEvent(
+  parent: TraceTimelineEvent,
+  nestedName: string,
+): TraceTimelineEvent {
+  let category: TraceTimelineEvent["category"] = "tool";
+  let label = nestedName;
+  let server: string | null = null;
+
+  if (nestedName.startsWith("mcp__")) {
+    const [nextServer, ...tool] = nestedName.slice("mcp__".length).split("__");
+    category = "mcp";
+    server = nextServer || null;
+    label = tool.join("__") || nestedName;
+  } else if (["exec_command", "write_stdin", "wait"].includes(nestedName)) {
+    category = "cli";
+  } else if (nestedName === "web__run" || nestedName === "web.run") {
+    category = "browser";
+    label = "web.run";
+  } else if (
+    nestedName === "apply_patch" ||
+    nestedName === "view_image" ||
+    nestedName === "read_file"
+  ) {
+    category = "file";
+  } else if (
+    nestedName.includes("browser") ||
+    nestedName.includes("chrome") ||
+    nestedName.includes("playwright") ||
+    nestedName.includes("computer_use")
+  ) {
+    category = "browser";
+  } else if (
+    nestedName.includes("spawn_agent") ||
+    nestedName.includes("collaboration") ||
+    nestedName.includes("thread")
+  ) {
+    category = "agent";
+  }
+
+  return {
+    ...parent,
+    category,
+    label,
+    server,
+    subject: null,
+    detail: null,
+    arguments: [],
+    arguments_json: null,
+  };
+}
+
+function nestedToolCategory(name: string): TraceTimelineEvent["category"] {
+  return semanticNestedToolEvent(
+    {
+      category: "tool",
+    } as TraceTimelineEvent,
+    name,
+  ).category;
+}
+
+function toolSubtypeCategories(
+  event: TraceTimelineEvent,
+): Set<TraceTimelineEvent["category"]> {
+  const categories = new Set<TraceTimelineEvent["category"]>([event.category]);
+  const nested = nestedToolNames(event);
+  for (const name of nested) {
+    categories.add(nestedToolCategory(name));
+  }
+  return categories;
+}
+
+function toolEventFilterIcon(filter: EventFilter) {
+  if (filter === "tools") return <Boxes aria-hidden="true" />;
+  if (filter === "mcp") return <Network aria-hidden="true" />;
+  if (filter === "cli") return <Terminal aria-hidden="true" />;
+  if (filter === "skill") return <Sparkles aria-hidden="true" />;
+  if (filter === "browser") return <Globe2 aria-hidden="true" />;
+  if (filter === "file") return <FileText aria-hidden="true" />;
+  if (filter === "agent") return <Bot aria-hidden="true" />;
+  return <Wrench aria-hidden="true" />;
+}
+
+function toolUsageGroupIdentity(
+  event: TraceTimelineEvent,
+  locale: Locale,
+): Pick<ToolUsageGroup, "key" | "kind" | "name"> {
+  if (event.category === "mcp") {
+    const server =
+      event.server?.trim() || copy(locale, "未知 MCP", "Unknown MCP");
+    return { key: `mcp:${server}`, kind: "mcp", name: server };
+  }
+  if (event.category === "cli") {
+    return {
+      key: "cli",
+      kind: "cli",
+      name: copy(locale, "命令行", "Command line"),
+    };
+  }
+  if (event.category === "skill") {
+    return {
+      key: "skill",
+      kind: "skill",
+      name: "Skills",
+    };
+  }
+  if (isHostedWebTool(event)) {
+    return { key: "builtin:web", kind: "builtin", name: "Codex Web" };
+  }
+  const names: Partial<
+    Record<TraceTimelineEvent["category"], [string, string]>
+  > = {
+    file: ["文件系统", "File system"],
+    browser: ["浏览器", "Browser"],
+    automation: ["自动化", "Automation"],
+    agent: ["任务与子 Agent", "Tasks and subagents"],
+    tool: ["Codex 工具", "Codex tools"],
+  };
+  const label = names[event.category] ?? ["其他工具", "Other tools"];
+  return {
+    key: `builtin:${event.category}`,
+    kind: "builtin",
+    name: copy(locale, ...label),
+  };
+}
+
+function collectToolUsage(
+  turns: TraceTurnSummary[],
+  locale: Locale,
+): ToolUsageGroup[] {
+  const groups = new Map<
+    string,
+    ToolUsageGroup & { toolMap: Map<string, ToolUsageItem> }
+  >();
+
+  for (const turn of turns) {
+    const calls = bundleToolCalls(turn.timeline);
+    const observedMcp = new Map<string, number>();
+    for (const call of calls) {
+      const event = primaryToolEvent(call);
+      if (
+        event.category === "mcp" &&
+        event.source_type === "event_msg.mcp_tool_call_end"
+      ) {
+        const key = `${event.server ?? ""}::${event.label}`;
+        observedMcp.set(key, (observedMcp.get(key) ?? 0) + 1);
+      }
+    }
+
+    for (const call of calls) {
+      const parent = primaryToolEvent(call);
+      const nested = parent.category === "skill" ? [] : nestedToolNames(parent);
+      const semanticEvents = (
+        nested.length > 0
+          ? nested.map((name) => semanticNestedToolEvent(parent, name))
+          : [parent]
+      ).filter((event) => {
+        if (nested.length === 0 || event.category !== "mcp") return true;
+        const key = `${event.server ?? ""}::${event.label}`;
+        const remaining = observedMcp.get(key) ?? 0;
+        if (remaining <= 0) return true;
+        observedMcp.set(key, remaining - 1);
+        return false;
+      });
+      const canAttributeWrapperMetrics = semanticEvents.length === 1;
+
+      for (const event of semanticEvents) {
+        const identity = toolUsageGroupIdentity(event, locale);
+        const group = groups.get(identity.key) ?? {
+          ...identity,
+          calls: 0,
+          failures: 0,
+          tools: [],
+          toolMap: new Map<string, ToolUsageItem>(),
+        };
+        const failed =
+          canAttributeWrapperMetrics &&
+          (parent.status === "failed" || call.result?.status === "failed");
+        const result = call.result;
+        const execution = call.execution;
+        const durationMs = canAttributeWrapperMetrics
+          ? (execution?.duration_ms ??
+            (parent.completed_at && parent.timestamp
+              ? Math.max(
+                  new Date(parent.completed_at).getTime() -
+                    new Date(parent.timestamp).getTime(),
+                  0,
+                )
+              : 0))
+          : 0;
+        const toolKey = event.label || event.subject || identity.name;
+        const item = group.toolMap.get(toolKey) ?? {
+          key: toolKey,
+          name: toolKey,
+          action: toolAction(event.label, locale, event.arguments),
+          calls: 0,
+          failures: 0,
+          durationMs: 0,
+          outputBytes: 0,
+          subjects: [],
+        };
+        item.calls += 1;
+        item.failures += Number(failed);
+        item.durationMs += durationMs;
+        item.outputBytes += canAttributeWrapperMetrics
+          ? (result?.output_bytes ?? parent.output_bytes)
+          : 0;
+        if (event.subject && !item.subjects.includes(event.subject)) {
+          item.subjects.push(event.subject);
+        }
+        group.calls += 1;
+        group.failures += Number(failed);
+        group.toolMap.set(toolKey, item);
+        groups.set(identity.key, group);
+      }
+    }
+  }
+
+  const kindOrder: Record<ToolUsageGroup["kind"], number> = {
+    mcp: 0,
+    cli: 1,
+    skill: 2,
+    builtin: 3,
+  };
+  return [...groups.values()]
+    .map(({ toolMap, ...group }) => ({
+      ...group,
+      tools: [...toolMap.values()].sort(
+        (left, right) =>
+          right.calls - left.calls || left.name.localeCompare(right.name),
+      ),
+    }))
+    .sort(
+      (left, right) =>
+        kindOrder[left.kind] - kindOrder[right.kind] ||
+        right.calls - left.calls ||
+        left.name.localeCompare(right.name),
+    );
+}
+
+function ToolUsageGroupIcon({ kind }: { kind: ToolUsageGroup["kind"] }) {
+  if (kind === "mcp") return <Network aria-hidden="true" />;
+  if (kind === "cli") return <Terminal aria-hidden="true" />;
+  if (kind === "skill") return <Sparkles aria-hidden="true" />;
+  return <Wrench aria-hidden="true" />;
+}
+
+function ToolUsageOverview({
+  turns,
+  locale,
+}: {
+  turns: TraceTurnSummary[];
+  locale: Locale;
+}) {
+  const groups = useMemo(
+    () => collectToolUsage(turns, locale),
+    [locale, turns],
+  );
+  const requestRecords = useMemo(
+    () =>
+      turns.reduce(
+        (sum, turn) => sum + bundleToolCalls(turn.timeline).length,
+        0,
+      ),
+    [turns],
+  );
+  const totalCalls = groups.reduce((sum, group) => sum + group.calls, 0);
+  const failedCalls = groups.reduce((sum, group) => sum + group.failures, 0);
+  const mcpServers = groups.filter((group) => group.kind === "mcp").length;
+  const cliCalls = groups
+    .filter((group) => group.kind === "cli")
+    .reduce((sum, group) => sum + group.calls, 0);
+  const skillCalls = groups
+    .filter((group) => group.kind === "skill")
+    .reduce((sum, group) => sum + group.calls, 0);
+
+  if (groups.length === 0) {
+    return (
+      <p className="trace-lite-muted">
+        {copy(
+          locale,
+          "这个 Session 没有工具调用记录。",
+          "This session has no tool-call records.",
+        )}
+      </p>
+    );
+  }
+
+  return (
+    <section
+      className="trace-tool-usage"
+      aria-label={copy(locale, "调用统计", "Call statistics")}
+    >
+      <div className="trace-tool-usage-summary">
+        <span>
+          <Boxes aria-hidden="true" />
+          <small>{copy(locale, "可识别操作", "Identified operations")}</small>
+          <strong>{totalCalls}</strong>
+        </span>
+        <span>
+          <Network aria-hidden="true" />
+          <small>MCP Server</small>
+          <strong>{mcpServers}</strong>
+        </span>
+        <span>
+          <Terminal aria-hidden="true" />
+          <small>CLI</small>
+          <strong>{cliCalls}</strong>
+        </span>
+        <span>
+          <Sparkles aria-hidden="true" />
+          <small>Skills</small>
+          <strong>{skillCalls}</strong>
+        </span>
+        <span className={failedCalls > 0 ? "failed" : ""}>
+          <Wrench aria-hidden="true" />
+          <small>{copy(locale, "失败", "Failed")}</small>
+          <strong>{failedCalls}</strong>
+        </span>
+      </div>
+
+      <p className="trace-tool-usage-note">
+        {copy(
+          locale,
+          `Session 中有 ${requestRecords} 组工具记录，识别出 ${totalCalls} 个操作。MCP 以 mcp_tool_call_end 为执行凭据；exec 包装中的其他 tools.* 只能证明被包装记录，合并耗时和输出不会猜测分摊。`,
+          `The Session contains ${requestRecords} tool-record groups and ${totalCalls} identified operations. MCP execution is evidenced by mcp_tool_call_end; other tools.* entries inside exec are wrapper evidence only, so aggregate duration and output are not guessed per inner operation.`,
+        )}
+      </p>
+
+      <div className="trace-tool-groups">
+        {groups.map((group, index) => (
+          <details
+            className={`trace-tool-group kind-${group.kind}`}
+            key={group.key}
+            open={groups.length <= 5 || index < 2}
+          >
+            <summary>
+              <span className="trace-tool-group-icon">
+                <ToolUsageGroupIcon kind={group.kind} />
+              </span>
+              <span className="trace-tool-group-name">
+                <strong>{group.name}</strong>
+                <small>
+                  {group.kind === "mcp"
+                    ? "MCP Server"
+                    : group.kind === "cli"
+                      ? copy(locale, "本机命令", "Local commands")
+                      : group.kind === "skill"
+                        ? "Codex Skills"
+                        : copy(locale, "工具运行时", "Tool runtime")}
+                </small>
+              </span>
+              <span className="trace-tool-group-count">
+                <strong>{group.calls}</strong>
+                <small>{copy(locale, "次", "calls")}</small>
+              </span>
+              {group.failures > 0 && (
+                <span className="trace-tool-group-failures">
+                  {copy(
+                    locale,
+                    `${group.failures} 次失败`,
+                    `${group.failures} failed`,
+                  )}
+                </span>
+              )}
+              <ChevronDown aria-hidden="true" />
+            </summary>
+            <div className="trace-tool-group-body">
+              {group.tools.map((tool) => (
+                <div className="trace-tool-usage-row" key={tool.key}>
+                  <span>
+                    <strong>{tool.action}</strong>
+                    <code>{tool.name}</code>
+                    {tool.subjects.length > 0 && (
+                      <small title={tool.subjects.join("\n")}>
+                        {tool.subjects.slice(0, 2).join(" · ")}
+                        {tool.subjects.length > 2
+                          ? copy(
+                              locale,
+                              ` · 其他 ${tool.subjects.length - 2} 项`,
+                              ` · ${tool.subjects.length - 2} more`,
+                            )
+                          : ""}
+                      </small>
+                    )}
+                  </span>
+                  <span>
+                    <strong>{tool.calls}</strong>
+                    <small>{copy(locale, "次调用", "calls")}</small>
+                  </span>
+                  <span>
+                    <strong>
+                      {tool.durationMs > 0
+                        ? formatEventDuration(tool.durationMs, locale)
+                        : "—"}
+                    </strong>
+                    <small>{copy(locale, "累计耗时", "total time")}</small>
+                  </span>
+                  <span>
+                    <strong>
+                      {tool.outputBytes > 0
+                        ? formatBytes(tool.outputBytes, locale)
+                        : "—"}
+                    </strong>
+                    <small>{copy(locale, "结果大小", "result size")}</small>
+                  </span>
+                  <span className={tool.failures > 0 ? "failed" : ""}>
+                    <strong>{tool.failures}</strong>
+                    <small>{copy(locale, "失败", "failed")}</small>
+                  </span>
+                </div>
+              ))}
+            </div>
+          </details>
+        ))}
+      </div>
+    </section>
   );
 }
 
@@ -380,6 +962,13 @@ function eventFilterLabel(filter: EventFilter, locale: Locale): string {
     input: ["输入", "Input"],
     model: ["LLM", "LLM"],
     tools: ["工具", "Tools"],
+    mcp: ["MCP", "MCP"],
+    cli: ["CLI", "CLI"],
+    skill: ["Skills", "Skills"],
+    browser: ["Web / 浏览器", "Web / browser"],
+    file: ["文件", "Files"],
+    agent: ["Agent", "Agent"],
+    other_tools: ["其他", "Other"],
     usage: ["用量", "Usage"],
     lifecycle: ["状态", "State"],
     context: ["上下文", "Context"],
@@ -404,13 +993,19 @@ function matchesEventFilter(
       "tool",
     ].includes(event.category);
   }
+  if (isToolEventFilter(filter)) {
+    const categories = toolSubtypeCategories(event);
+    if (filter === "other_tools") {
+      return [...categories].some((category) =>
+        ["automation", "tool"].includes(category),
+      );
+    }
+    return categories.has(filter);
+  }
   return event.category === filter;
 }
 
-function eventCategoryLabel(
-  event: TraceTimelineEvent,
-  locale: Locale,
-): string {
+function eventCategoryLabel(event: TraceTimelineEvent, locale: Locale): string {
   if (event.category === "input") return copy(locale, "输入", "INPUT");
   if (event.category === "model") return "LLM";
   if (event.category === "usage") return copy(locale, "用量", "USAGE");
@@ -419,9 +1014,7 @@ function eventCategoryLabel(
   if (event.category === "skill") return "SKILL";
   if (event.category === "file") return copy(locale, "文件", "FILE");
   if (event.category === "browser") {
-    return isHostedWebTool(event)
-      ? "WEB"
-      : copy(locale, "浏览器", "BROWSER");
+    return isHostedWebTool(event) ? "WEB" : copy(locale, "浏览器", "BROWSER");
   }
   if (event.category === "automation") return copy(locale, "自动化", "AUTO");
   if (event.category === "agent") return "AGENT";
@@ -476,9 +1069,7 @@ function eventExplanation(
             `reasoning ${turn.reasoning_effort}`,
           )
         : null,
-      turn.summary_mode
-        ? `Summary ${turn.summary_mode}`
-        : null,
+      turn.summary_mode ? `Summary ${turn.summary_mode}` : null,
     ].filter(Boolean);
     return copy(
       locale,
@@ -512,6 +1103,13 @@ function eventExplanation(
   if (event.kind === "tool_request") {
     const passLabel = modelPass ? `LLM #${modelPass}` : "LLM";
     const action = toolAction(event.label, locale, event.arguments);
+    if (event.source_type === "event_msg.mcp_tool_call_end") {
+      return copy(
+        locale,
+        `Session 只保存了一条 MCP 完成记录；X-Ray 从其中的 invocation 复原出请求阶段：${event.server ?? "MCP"}.${event.label}，用于${action}。请求、耗时和结果都对应右侧同一行号。`,
+        `The Session stores one MCP completion record. X-Ray reconstructs this request phase from its invocation: ${event.server ?? "MCP"}.${event.label}, used to ${action.toLowerCase()}. Request, duration, and output all point to the same source line.`,
+      );
+    }
     return copy(
       locale,
       `${passLabel} 返回了 ${event.label} 的调用名称与参数，用于${action}。这条记录只表示请求已经产生，还不能证明工具已经执行完成。`,
@@ -520,6 +1118,13 @@ function eventExplanation(
   }
   if (event.kind === "tool_execution") {
     const runtime = toolRuntimeLabel(event, locale);
+    if (event.source_type === "event_msg.mcp_tool_call_end") {
+      return copy(
+        locale,
+        `这不是额外一行记录，而是同一条 mcp_tool_call_end 的执行视图。Codex 记录了 ${runtime} 的结束时间和 duration，X-Ray 据此还原执行区间。`,
+        `This is not another source record; it is the execution view of the same mcp_tool_call_end. Codex stored the ${runtime} end time and duration, from which X-Ray reconstructs the execution interval.`,
+      );
+    }
     return copy(
       locale,
       `Codex 调度 ${runtime} 执行请求；这条独立记录证明执行已经结束。耗时从同一 Call ID 的工具请求时间计算到本记录时间。`,
@@ -527,6 +1132,13 @@ function eventExplanation(
     );
   }
   if (event.kind === "tool_result") {
+    if (event.source_type === "event_msg.mcp_tool_call_end") {
+      return copy(
+        locale,
+        "同一条 mcp_tool_call_end 还包含执行结果。它证明 MCP 调用已完成；Session 没有再保存一条独立的结果回填记录。",
+        "The same mcp_tool_call_end also contains the execution result. It proves the MCP call completed; the Session does not store another independent write-back record.",
+      );
+    }
     return copy(
       locale,
       `Codex 将工具输出写入 Session，并通过同一 Call ID 与请求关联。后续 LLM 处理会把这份结果作为上下文输入。`,
@@ -535,22 +1147,32 @@ function eventExplanation(
   }
   if (event.kind === "compaction") {
     const windowLabel = event.sequence
-      ? copy(locale, `第 ${event.sequence} 个上下文窗口`, `context window ${event.sequence}`)
+      ? copy(
+          locale,
+          `第 ${event.sequence} 个上下文窗口`,
+          `context window ${event.sequence}`,
+        )
       : copy(locale, "一个新的上下文窗口", "a new context window");
-    const historyLabel = event.content_parts > 0
-      ? copy(
-          locale,
-          `替换后的历史包含 ${event.content_parts} 条结构化记录`,
-          `the replacement history contains ${event.content_parts} structured records`,
-        )
-      : copy(locale, "Session 未记录替换后的条目数", "the Session did not record the replacement item count");
-    const reclaimedLabel = event.context_reclaimed_tokens != null
-      ? copy(
-          locale,
-          `；按压缩前后相邻模型输入估算，减少了 ${formatExactTokens(event.context_reclaimed_tokens)} Token`,
-          `; adjacent model-input records estimate ${formatExactTokens(event.context_reclaimed_tokens)} fewer tokens`,
-        )
-      : "";
+    const historyLabel =
+      event.content_parts > 0
+        ? copy(
+            locale,
+            `替换后的历史包含 ${event.content_parts} 条结构化记录`,
+            `the replacement history contains ${event.content_parts} structured records`,
+          )
+        : copy(
+            locale,
+            "Session 未记录替换后的条目数",
+            "the Session did not record the replacement item count",
+          );
+    const reclaimedLabel =
+      event.context_reclaimed_tokens != null
+        ? copy(
+            locale,
+            `；按压缩前后相邻模型输入估算，减少了 ${formatExactTokens(event.context_reclaimed_tokens)} Token`,
+            `; adjacent model-input records estimate ${formatExactTokens(event.context_reclaimed_tokens)} fewer tokens`,
+          )
+        : "";
     return copy(
       locale,
       `Codex 生成了${windowLabel}，${historyLabel}。压缩摘要以加密内容保存在 Session 中，X-Ray 只能确认大小，不能还原正文${reclaimedLabel}。`,
@@ -558,18 +1180,20 @@ function eventExplanation(
     );
   }
   if (event.label === "user_prompt") {
-    return copy(
-      locale,
-      "这是用户真正提交给 Codex 的内容，不包括系统自动注入的环境和权限信息。",
-      "This is the user's actual message, excluding environment and permission data injected by Codex.",
-    ) + mirroredRecordNote;
+    return (
+      copy(
+        locale,
+        "这是用户真正提交给 Codex 的内容，不包括系统自动注入的环境和权限信息。",
+        "This is the user's actual message, excluding environment and permission data injected by Codex.",
+      ) + mirroredRecordNote
+    );
   }
   if (event.label === "commentary") {
     return (
       copy(
-      locale,
-      `${modelPass ? `LLM #${modelPass}` : "LLM"} 返回了这段过程说明；它会先显示给用户，但还不是最终回复。`,
-      `${modelPass ? `LLM #${modelPass}` : "The LLM"} returned this progress message. Codex showed it to the user, but it was not the final response.`,
+        locale,
+        `${modelPass ? `LLM #${modelPass}` : "LLM"} 返回了这段过程说明；它会先显示给用户，但还不是最终回复。`,
+        `${modelPass ? `LLM #${modelPass}` : "The LLM"} returned this progress message. Codex showed it to the user, but it was not the final response.`,
       ) + mirroredRecordNote
     );
   }
@@ -591,9 +1215,9 @@ function eventExplanation(
         : "";
     return (
       copy(
-      locale,
-      `${afterTool}${modelPass ? `LLM #${modelPass}` : "LLM"} 生成了这段最终回复，Codex 将它展示给用户。`,
-      `${afterTool}${modelPass ? `LLM #${modelPass}` : "The LLM"} generated this final response, which Codex displayed to the user.`,
+        locale,
+        `${afterTool}${modelPass ? `LLM #${modelPass}` : "LLM"} 生成了这段最终回复，Codex 将它展示给用户。`,
+        `${afterTool}${modelPass ? `LLM #${modelPass}` : "The LLM"} generated this final response, which Codex displayed to the user.`,
       ) + mirroredRecordNote
     );
   }
@@ -601,6 +1225,41 @@ function eventExplanation(
     locale,
     "这是模型返回的一条消息记录。",
     "This is a message returned by the model.",
+  );
+}
+
+function TraceEventContent({
+  content,
+  locale,
+}: {
+  content: string;
+  locale: Locale;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const lineCount = content.split(/\r?\n/).length;
+  const collapsible = content.length > 360 || lineCount > 4;
+
+  return (
+    <div
+      className={`trace-event-content-disclosure${
+        collapsible ? " collapsible" : ""
+      }${expanded ? " expanded" : " collapsed"}`}
+    >
+      <div className="trace-event-content">{content}</div>
+      {collapsible && (
+        <button
+          type="button"
+          className="trace-event-content-toggle"
+          aria-expanded={expanded}
+          onClick={() => setExpanded((current) => !current)}
+        >
+          <ChevronDown aria-hidden="true" />
+          {expanded
+            ? copy(locale, "收起正文", "Collapse content")
+            : copy(locale, "展开完整正文", "Show full content")}
+        </button>
+      )}
+    </div>
   );
 }
 
@@ -648,19 +1307,19 @@ function TimelineEventRow({
             `Tool output written to context · ${toolAction(event.label, locale, event.arguments)}`,
           )
     : event.kind === "phase"
-        ? event.category === "model" && modelPass
-          ? copy(
-              locale,
-              `LLM #${modelPass} 返回 · ${phaseEventTitle(event, locale)}`,
-              `LLM #${modelPass} returned · ${phaseEventTitle(event, locale)}`,
-            )
-          : phaseEventTitle(event, locale)
-        : event.kind === "tokens" && event.sequence != null
-          ? copy(
-              locale,
-              `LLM #${event.sequence} · 用量凭据`,
-              `LLM #${event.sequence} · usage record`,
-            )
+      ? event.category === "model" && modelPass
+        ? copy(
+            locale,
+            `LLM #${modelPass} 返回 · ${phaseEventTitle(event, locale)}`,
+            `LLM #${modelPass} returned · ${phaseEventTitle(event, locale)}`,
+          )
+        : phaseEventTitle(event, locale)
+      : event.kind === "tokens" && event.sequence != null
+        ? copy(
+            locale,
+            `LLM #${event.sequence} · 用量凭据`,
+            `LLM #${event.sequence} · usage record`,
+          )
         : copy(locale, ...labels[event.kind]);
   const factualState =
     event.status === "failed"
@@ -669,7 +1328,14 @@ function TimelineEventRow({
         ? copy(locale, "未完成", "Pending")
         : event.repeated
           ? copy(locale, "重复调用", "Repeated")
-        : null;
+          : null;
+  const toolStage = isToolTimelineEvent(event)
+    ? event.kind === "tool_request"
+      ? copy(locale, "1 · 请求", "1 · Request")
+      : event.kind === "tool_execution"
+        ? copy(locale, "2 · 执行完成", "2 · Execution done")
+        : copy(locale, "3 · 结果回填", "3 · Result written back")
+    : null;
   const contextPercent =
     event.context_window && event.context_window > 0
       ? (event.input_tokens / event.context_window) * 100
@@ -682,6 +1348,9 @@ function TimelineEventRow({
       event.arguments_json != null ||
       event.result_json != null ||
       event.result_fields.length > 0);
+  const nestedTools =
+    event.kind === "tool_request" ? nestedToolNames(event) : [];
+  const nestedSummary = nestedToolSummary(nestedTools);
 
   return (
     <li
@@ -695,6 +1364,7 @@ function TimelineEventRow({
           <span className={`trace-event-kind ${event.category}`}>
             {eventCategoryLabel(event, locale)}
           </span>
+          {toolStage && <span className="trace-tool-stage">{toolStage}</span>}
           <strong>{title}</strong>
           <TraceInfoTip
             text={eventExplanation(event, turn, modelPass, locale)}
@@ -717,6 +1387,37 @@ function TimelineEventRow({
           <div className="trace-lite-server">
             <span>MCP Server</span>
             <code>{event.server}</code>
+          </div>
+        )}
+        {nestedSummary.length > 0 && (
+          <div className="trace-nested-tools">
+            <span>
+              {copy(
+                locale,
+                `外层 exec 记录了 ${nestedTools.length} 个内层操作`,
+                `Outer exec records ${nestedTools.length} inner operations`,
+              )}
+            </span>
+            <span>
+              {nestedSummary.slice(0, 6).map((tool) => (
+                <code
+                  key={tool.name}
+                  className={`kind-${nestedToolCategory(tool.name)}`}
+                >
+                  {nestedToolDisplayName(tool.name)}
+                  {tool.calls > 1 ? ` ×${tool.calls}` : ""}
+                </code>
+              ))}
+              {nestedSummary.length > 6 && (
+                <code>
+                  {copy(
+                    locale,
+                    `其他 ${nestedSummary.length - 6} 类`,
+                    `${nestedSummary.length - 6} more`,
+                  )}
+                </code>
+              )}
+            </span>
           </div>
         )}
         {isToolTimelineEvent(event) && event.subject && (
@@ -791,45 +1492,44 @@ function TimelineEventRow({
             )}
             {event.content_parts > 0 && (
               <span>
-                {copy(locale, "替换后历史", "Replacement history")} {" "}
+                {copy(locale, "替换后历史", "Replacement history")}{" "}
                 <b>{event.content_parts}</b>
               </span>
             )}
             {event.encrypted_bytes > 0 && (
               <span>
-                {copy(locale, "加密摘要", "Encrypted summary")} {" "}
+                {copy(locale, "加密摘要", "Encrypted summary")}{" "}
                 <b>{formatBytes(event.encrypted_bytes, locale)}</b>
               </span>
             )}
             {event.context_before_tokens != null && (
               <span>
-                {copy(locale, "压缩前", "Before")} {" "}
+                {copy(locale, "压缩前", "Before")}{" "}
                 <b>{formatExactTokens(event.context_before_tokens)}</b>
               </span>
             )}
             {event.context_after_tokens != null && (
               <span>
-                {copy(locale, "压缩后", "After")} {" "}
+                {copy(locale, "压缩后", "After")}{" "}
                 <b>{formatExactTokens(event.context_after_tokens)}</b>
               </span>
             )}
             {event.context_reclaimed_tokens != null && (
               <span className="reclaimed">
-                {copy(locale, "估算减少", "Estimated reduction")} {" "}
+                {copy(locale, "估算减少", "Estimated reduction")}{" "}
                 <b>{formatExactTokens(event.context_reclaimed_tokens)}</b>
               </span>
             )}
           </div>
         )}
         {event.content && (
-          <div className="trace-event-content">{event.content}</div>
+          <TraceEventContent content={event.content} locale={locale} />
         )}
         {event.kind === "phase" && !event.content && (
           <div className="trace-lite-event-meta">
             {event.content_parts > 0 && (
               <span>
-                {copy(locale, "内容", "Content")}{" "}
-                <b>{event.content_parts}</b>
+                {copy(locale, "内容", "Content")} <b>{event.content_parts}</b>
               </span>
             )}
             {event.content_bytes > 0 && (
@@ -840,8 +1540,7 @@ function TimelineEventRow({
             )}
             {event.summary_parts > 0 && (
               <span>
-                {copy(locale, "摘要", "Summaries")}{" "}
-                <b>{event.summary_parts}</b>
+                {copy(locale, "摘要", "Summaries")} <b>{event.summary_parts}</b>
               </span>
             )}
             {event.encrypted_bytes > 0 && (
@@ -881,8 +1580,7 @@ function TimelineEventRow({
               )}
               {event.kind === "tool_result" && modelPass != null && (
                 <span>
-                  {copy(locale, "下一步", "Next")}{" "}
-                  <b>LLM #{modelPass + 1}</b>
+                  {copy(locale, "下一步", "Next")} <b>LLM #{modelPass + 1}</b>
                 </span>
               )}
             </div>
@@ -903,25 +1601,33 @@ function TimelineEventRow({
                           ? copy(locale, "结果记录", "Output record")
                           : copy(locale, "请求记录", "Request record")}
                     </dt>
-                    <dd><code>{event.source_type}</code></dd>
+                    <dd>
+                      <code>{event.source_type}</code>
+                    </dd>
                   </div>
                 )}
                 {event.execution_end_source_type && (
                   <div className="trace-call-identity-wide">
                     <dt>{copy(locale, "执行结束", "Execution ended")}</dt>
-                    <dd><code>{event.execution_end_source_type}</code></dd>
+                    <dd>
+                      <code>{event.execution_end_source_type}</code>
+                    </dd>
                   </div>
                 )}
                 {event.result_source_type && (
                   <div className="trace-call-identity-wide">
                     <dt>{copy(locale, "结果记录", "Output record")}</dt>
-                    <dd><code>{event.result_source_type}</code></dd>
+                    <dd>
+                      <code>{event.result_source_type}</code>
+                    </dd>
                   </div>
                 )}
                 {event.call_id && (
                   <div className="trace-call-identity-wide">
                     <dt>Call ID</dt>
-                    <dd><code>{event.call_id}</code></dd>
+                    <dd>
+                      <code>{event.call_id}</code>
+                    </dd>
                   </div>
                 )}
                 <div className="trace-call-identity-time">
@@ -954,7 +1660,9 @@ function TimelineEventRow({
                 {event.server && (
                   <div className="trace-call-identity-wide">
                     <dt>MCP Server</dt>
-                    <dd><code>{event.server}</code></dd>
+                    <dd>
+                      <code>{event.server}</code>
+                    </dd>
                   </div>
                 )}
               </dl>
@@ -1073,7 +1781,9 @@ function TurnTimeline({
         </span>
         <span className="trace-lite-turn-stat context">
           <strong>{contextLabel}</strong>
-          <small>{copy(locale, "上下文峰值 / 窗口", "Context peak / window")}</small>
+          <small>
+            {copy(locale, "上下文峰值 / 窗口", "Context peak / window")}
+          </small>
         </span>
         <span className="trace-lite-turn-stat tools">
           <strong>{turn.tool_calls}</strong>
@@ -1083,10 +1793,7 @@ function TurnTimeline({
           <i className={`trace-status-dot ${turn.status}`} />
           {statusLabel(turn.status, t)}
         </span>
-        <ChevronRight
-          className="trace-lite-turn-chevron"
-          aria-hidden="true"
-        />
+        <ChevronRight className="trace-lite-turn-chevron" aria-hidden="true" />
       </button>
 
       {open && (
@@ -1143,7 +1850,9 @@ function TurnTimeline({
 
           <section className="trace-context-flow">
             <header>
-              <strong>{copy(locale, "本轮上下文", "Context in this turn")}</strong>
+              <strong>
+                {copy(locale, "本轮上下文", "Context in this turn")}
+              </strong>
               <TraceInfoTip
                 text={copy(
                   locale,
@@ -1154,7 +1863,9 @@ function TurnTimeline({
             </header>
             <div className="trace-context-stages">
               <span>
-                <small>{copy(locale, "首次模型输入", "First model input")}</small>
+                <small>
+                  {copy(locale, "首次模型输入", "First model input")}
+                </small>
                 <strong>{formatExactTokens(turn.first_input_tokens)}</strong>
               </span>
               <i aria-hidden="true" />
@@ -1164,7 +1875,9 @@ function TurnTimeline({
               </span>
               <i aria-hidden="true" />
               <span>
-                <small>{copy(locale, "末次模型输入", "Final model input")}</small>
+                <small>
+                  {copy(locale, "末次模型输入", "Final model input")}
+                </small>
                 <strong>{formatExactTokens(turn.last_input_tokens)}</strong>
               </span>
             </div>
@@ -1282,13 +1995,16 @@ export default function TraceView({
     }
   });
   const [openTurnId, setOpenTurnId] = useState<string | null>(null);
+  const [executionView, setExecutionView] =
+    useState<TraceExecutionView>("timeline");
   const [eventFilter, setEventFilter] = useState<EventFilter>("all");
   const [detail, setDetail] = useState<TraceSessionDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
   const [analyzingId, setAnalyzingId] = useState<string | null>(null);
-  const [batchAnalysis, setBatchAnalysis] =
-    useState<BatchAnalysisState | null>(null);
+  const [batchAnalysis, setBatchAnalysis] = useState<BatchAnalysisState | null>(
+    null,
+  );
   const [batchConfirmation, setBatchConfirmation] =
     useState<BatchConfirmation | null>(null);
   const [batchError, setBatchError] = useState<string | null>(null);
@@ -1303,10 +2019,7 @@ export default function TraceView({
     readTraceNavigationTarget(),
   );
 
-  const openRequestedTurn = (
-    next: TraceSessionDetail,
-    sessionId: string,
-  ) => {
+  const openRequestedTurn = (next: TraceSessionDetail, sessionId: string) => {
     const target = navigationTarget.current;
     const requested =
       target.sessionId === sessionId &&
@@ -1325,11 +2038,11 @@ export default function TraceView({
   );
   const eventCounts = useMemo(() => {
     const counts = new Map<EventFilter, number>(
-      eventFilters.map((filter) => [filter, 0]),
+      allEventFilters.map((filter) => [filter, 0]),
     );
     for (const turn of detail?.turns ?? []) {
       for (const event of turn.timeline) {
-        for (const filter of eventFilters) {
+        for (const filter of allEventFilters) {
           if (matchesEventFilter(event, filter)) {
             counts.set(filter, (counts.get(filter) ?? 0) + 1);
           }
@@ -1338,6 +2051,14 @@ export default function TraceView({
     }
     return counts;
   }, [detail]);
+  const actualToolCalls = useMemo(
+    () =>
+      collectToolUsage(detail?.turns ?? [], locale).reduce(
+        (sum, group) => sum + group.calls,
+        0,
+      ),
+    [detail, locale],
+  );
 
   const sessions = useMemo(() => {
     const normalized = query.trim().toLocaleLowerCase(locale);
@@ -1469,6 +2190,7 @@ export default function TraceView({
   }, [selectedId, snapshot?.generated_at, snapshot?.sessions]);
 
   useEffect(() => {
+    setExecutionView("timeline");
     setEventFilter("all");
   }, [selectedId]);
 
@@ -1643,11 +2365,12 @@ export default function TraceView({
       } catch (reason) {
         failed += 1;
         failedSessionIds.push(session.id);
-        setBatchError((current) =>
-          current ??
-          `${conversationLabel(session, locale)}：${
-            reason instanceof Error ? reason.message : String(reason)
-          }`,
+        setBatchError(
+          (current) =>
+            current ??
+            `${conversationLabel(session, locale)}：${
+              reason instanceof Error ? reason.message : String(reason)
+            }`,
         );
       } finally {
         completed += 1;
@@ -1707,12 +2430,12 @@ export default function TraceView({
     }
     const frame = window.requestAnimationFrame(() => {
       const element = target.callId
-        ? [
-            ...document.querySelectorAll<HTMLElement>("[data-trace-call]"),
-          ].find((candidate) => candidate.dataset.traceCall === target.callId)
-        : [
-            ...document.querySelectorAll<HTMLElement>("[data-trace-turn]"),
-          ].find((candidate) => candidate.dataset.traceTurn === target.turnId);
+        ? [...document.querySelectorAll<HTMLElement>("[data-trace-call]")].find(
+            (candidate) => candidate.dataset.traceCall === target.callId,
+          )
+        : [...document.querySelectorAll<HTMLElement>("[data-trace-turn]")].find(
+            (candidate) => candidate.dataset.traceTurn === target.turnId,
+          );
       if (!element) return;
       element.scrollIntoView({ block: "center", behavior: "smooth" });
       element.classList.add("trace-event-target");
@@ -1858,288 +2581,304 @@ export default function TraceView({
               "Projects and conversations",
             )}
           >
-          <header>
-            <div>
-              <h2>{copy(locale, "项目与对话", "Projects & conversations")}</h2>
-              <small>
-                {copy(locale, "最近活跃优先", "Most recently active first")}
-              </small>
-            </div>
-            <span>{sessions.length}</span>
-          </header>
+            <header>
+              <div>
+                <h2>
+                  {copy(locale, "项目与对话", "Projects & conversations")}
+                </h2>
+                <small>
+                  {copy(locale, "最近活跃优先", "Most recently active first")}
+                </small>
+              </div>
+              <span>{sessions.length}</span>
+            </header>
 
-          <SearchField
-            className="trace-lite-search"
-            value={query}
-            onChange={setQuery}
-            placeholder={copy(
-              locale,
-              "搜索项目或对话",
-              "Search projects or conversations",
-            )}
-            ariaLabel={copy(
-              locale,
-              "搜索项目或对话",
-              "Search projects or conversations",
-            )}
-            clearLabel={copy(locale, "清除搜索", "Clear search")}
-          />
-
-          {batchConfirmation && (
-            <div
-              className="trace-batch-confirmation"
-              role="dialog"
-              aria-label={copy(
+            <SearchField
+              className="trace-lite-search"
+              value={query}
+              onChange={setQuery}
+              placeholder={copy(
                 locale,
-                "确认批量分析",
-                "Confirm batch analysis",
+                "搜索项目或对话",
+                "Search projects or conversations",
               )}
-            >
-              <strong>
-                {copy(
-                  locale,
-                  `分析 ${batchConfirmation.candidates.length} 个对话？`,
-                  `Analyze ${batchConfirmation.candidates.length} conversations?`,
-                )}
-              </strong>
-              <span>{batchConfirmation.project.name}</span>
-              <p>
-                {copy(
-                  locale,
-                  "逐个读取本地 Session 并把结构化结果写入 SQLite；不调用 LLM，也不消耗 Codex 额度。可随时停止。",
-                  "Reads local sessions one by one and persists structured results to SQLite. It does not call an LLM or consume Codex quota, and can be stopped.",
-                )}
-              </p>
-              <div>
-                <button
-                  type="button"
-                  onClick={() => setBatchConfirmation(null)}
-                >
-                  {copy(locale, "取消", "Cancel")}
-                </button>
-                <button
-                  type="button"
-                  className="primary-action"
-                  onClick={() =>
-                    void analyzeProject(
-                      batchConfirmation.project,
-                      batchConfirmation.candidates,
-                    )
-                  }
-                >
-                  {copy(locale, "开始分析", "Start analysis")}
-                </button>
-              </div>
-            </div>
-          )}
+              ariaLabel={copy(
+                locale,
+                "搜索项目或对话",
+                "Search projects or conversations",
+              )}
+              clearLabel={copy(locale, "清除搜索", "Clear search")}
+            />
 
-          {batchAnalysis && (
-            <div
-              className={`trace-batch-status ${batchAnalysis.status}`}
-              role="status"
-            >
-              <div>
+            {batchConfirmation && (
+              <div
+                className="trace-batch-confirmation"
+                role="dialog"
+                aria-label={copy(
+                  locale,
+                  "确认批量分析",
+                  "Confirm batch analysis",
+                )}
+              >
                 <strong>
-                  {batchAnalysis.status === "running"
-                    ? copy(locale, "正在分析项目", "Analyzing project")
-                    : batchAnalysis.status === "cancelled"
-                      ? copy(locale, "分析已停止", "Analysis stopped")
-                      : copy(locale, "项目分析完成", "Project analysis complete")}
-                </strong>
-                <span>
-                  {batchAnalysis.projectName} · {batchAnalysis.completed}/
-                  {batchAnalysis.total}
-                  {batchAnalysis.failed > 0
-                    ? copy(
-                        locale,
-                        ` · ${batchAnalysis.failed} 个失败`,
-                        ` · ${batchAnalysis.failed} failed`,
-                      )
-                    : ""}
-                </span>
-              </div>
-              <i>
-                <span
-                  style={{
-                    width: `${
-                      batchAnalysis.total > 0
-                        ? (batchAnalysis.completed / batchAnalysis.total) * 100
-                        : 0
-                    }%`,
-                  }}
-                />
-              </i>
-              <div className="trace-batch-actions">
-                {batchAnalysis.status !== "running" &&
-                  batchAnalysis.failedSessionIds.length > 0 && (
-                    <button
-                      type="button"
-                      onClick={retryFailedProjectSessions}
-                    >
-                      {copy(
-                        locale,
-                        `重试 ${batchAnalysis.failedSessionIds.length} 个失败`,
-                        `Retry ${batchAnalysis.failedSessionIds.length} failed`,
-                      )}
-                    </button>
+                  {copy(
+                    locale,
+                    `分析 ${batchConfirmation.candidates.length} 个对话？`,
+                    `Analyze ${batchConfirmation.candidates.length} conversations?`,
                   )}
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (batchAnalysis.status === "running") {
-                      cancelBatchAnalysis.current = true;
-                    } else {
-                      setBatchAnalysis(null);
-                      setBatchError(null);
+                </strong>
+                <span>{batchConfirmation.project.name}</span>
+                <p>
+                  {copy(
+                    locale,
+                    "逐个读取本地 Session 并把结构化结果写入 SQLite；不调用 LLM，也不消耗 Codex 额度。可随时停止。",
+                    "Reads local sessions one by one and persists structured results to SQLite. It does not call an LLM or consume Codex quota, and can be stopped.",
+                  )}
+                </p>
+                <div>
+                  <button
+                    type="button"
+                    onClick={() => setBatchConfirmation(null)}
+                  >
+                    {copy(locale, "取消", "Cancel")}
+                  </button>
+                  <button
+                    type="button"
+                    className="primary-action"
+                    onClick={() =>
+                      void analyzeProject(
+                        batchConfirmation.project,
+                        batchConfirmation.candidates,
+                      )
                     }
-                  }}
-                >
-                  {batchAnalysis.status === "running"
-                    ? copy(locale, "停止", "Stop")
-                    : copy(locale, "关闭", "Dismiss")}
-                </button>
+                  >
+                    {copy(locale, "开始分析", "Start analysis")}
+                  </button>
+                </div>
               </div>
-              {batchError && <small title={batchError}>{batchError}</small>}
-            </div>
-          )}
-
-          <div className="trace-lite-projects">
-            {projectGroups.length === 0 ? (
-              <p className="trace-lite-muted">
-                {copy(locale, "没有匹配的对话", "No matching conversations")}
-              </p>
-            ) : (
-              projectGroups.map((project) => {
-                const collapsed =
-                  !query && !expandedProjects.has(project.key);
-                const remaining = project.sessions.filter(
-                  (session) =>
-                    session.analysis_state !== "ready" &&
-                    Boolean(session.session_path),
-                ).length;
-                const isCurrentBatch =
-                  batchAnalysis?.projectKey === project.key;
-                return (
-                  <section className="trace-lite-project" key={project.key}>
-                    <div className="trace-lite-project-heading">
-                      <button
-                        className="trace-lite-project-row"
-                        onClick={() =>
-                          setExpandedProjects((current) => {
-                            const next = new Set(current);
-                            if (next.has(project.key)) next.delete(project.key);
-                            else next.add(project.key);
-                            return next;
-                          })
-                        }
-                        aria-expanded={!collapsed}
-                        title={project.path || project.name}
-                      >
-                        <ChevronRight
-                          className={`trace-lite-chevron${collapsed ? "" : " open"}`}
-                          aria-hidden="true"
-                        />
-                        {collapsed ? (
-                          <Folder
-                            className="trace-lite-folder-icon"
-                            aria-hidden="true"
-                          />
-                        ) : (
-                          <FolderOpen
-                            className="trace-lite-folder-icon"
-                            aria-hidden="true"
-                          />
-                        )}
-                        <span>
-                          <strong>{project.name}</strong>
-                          <small>
-                            {project.sessions.length}{" "}
-                            {copy(
-                              locale,
-                              "个对话",
-                              project.sessions.length === 1
-                                ? "conversation"
-                                : "conversations",
-                            )}
-                            {project.activeCount > 0 &&
-                              copy(
-                                locale,
-                                ` · ${project.activeCount} 活跃`,
-                                ` · ${project.activeCount} active`,
-                              )}
-                          </small>
-                        </span>
-                        <em>
-                          {project.analyzedCount}/{project.sessions.length}
-                        </em>
-                      </button>
-                      {(remaining > 0 ||
-                        (isCurrentBatch &&
-                          batchAnalysis?.status === "running")) && (
-                        <button
-                          className="trace-project-analyze"
-                          type="button"
-                          disabled={
-                            batchAnalysis?.status === "running" &&
-                            !isCurrentBatch
-                          }
-                          onClick={() => requestProjectAnalysis(project)}
-                          aria-label={copy(
-                            locale,
-                            `分析 ${project.name} 的 ${remaining} 个对话`,
-                            `Analyze ${remaining} conversations in ${project.name}`,
-                          )}
-                        >
-                          {isCurrentBatch &&
-                          batchAnalysis?.status === "running"
-                            ? copy(locale, "停止", "Stop")
-                            : copy(locale, `分析 ${remaining}`, `Analyze ${remaining}`)}
-                        </button>
-                      )}
-                    </div>
-
-                    {!collapsed && (
-                      <div className="trace-lite-conversations">
-                        {project.sessions.map((session) => (
-                          <button
-                            key={session.id}
-                            className={
-                              session.id === selected?.id ? "selected" : ""
-                            }
-                            onClick={() => {
-                              setSelectedId(session.id);
-                              setOpenTurnId(null);
-                            }}
-                            title={conversationLabel(session, locale)}
-                          >
-                            <i className={`trace-status-dot ${session.status}`} />
-                            <span>
-                              <strong>
-                                {conversationLabel(session, locale)}
-                              </strong>
-                              <small>
-                                {formatDateTime(session.updated_at, locale)}
-                                {session.is_subagent
-                                  ? copy(locale, " · 子任务", " · subtask")
-                                  : ""}
-                              </small>
-                            </span>
-                            <em>
-                              {session.analysis_state === "not_analyzed"
-                                ? copy(locale, "分析", "Analyze")
-                                : session.analysis_state === "stale"
-                                  ? copy(locale, "更新", "Update")
-                                  : formatReadableTokens(session.total_tokens)}
-                            </em>
-                          </button>
-                        ))}
-                      </div>
-                    )}
-                  </section>
-                );
-              })
             )}
-          </div>
+
+            {batchAnalysis && (
+              <div
+                className={`trace-batch-status ${batchAnalysis.status}`}
+                role="status"
+              >
+                <div>
+                  <strong>
+                    {batchAnalysis.status === "running"
+                      ? copy(locale, "正在分析项目", "Analyzing project")
+                      : batchAnalysis.status === "cancelled"
+                        ? copy(locale, "分析已停止", "Analysis stopped")
+                        : copy(
+                            locale,
+                            "项目分析完成",
+                            "Project analysis complete",
+                          )}
+                  </strong>
+                  <span>
+                    {batchAnalysis.projectName} · {batchAnalysis.completed}/
+                    {batchAnalysis.total}
+                    {batchAnalysis.failed > 0
+                      ? copy(
+                          locale,
+                          ` · ${batchAnalysis.failed} 个失败`,
+                          ` · ${batchAnalysis.failed} failed`,
+                        )
+                      : ""}
+                  </span>
+                </div>
+                <i>
+                  <span
+                    style={{
+                      width: `${
+                        batchAnalysis.total > 0
+                          ? (batchAnalysis.completed / batchAnalysis.total) *
+                            100
+                          : 0
+                      }%`,
+                    }}
+                  />
+                </i>
+                <div className="trace-batch-actions">
+                  {batchAnalysis.status !== "running" &&
+                    batchAnalysis.failedSessionIds.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={retryFailedProjectSessions}
+                      >
+                        {copy(
+                          locale,
+                          `重试 ${batchAnalysis.failedSessionIds.length} 个失败`,
+                          `Retry ${batchAnalysis.failedSessionIds.length} failed`,
+                        )}
+                      </button>
+                    )}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (batchAnalysis.status === "running") {
+                        cancelBatchAnalysis.current = true;
+                      } else {
+                        setBatchAnalysis(null);
+                        setBatchError(null);
+                      }
+                    }}
+                  >
+                    {batchAnalysis.status === "running"
+                      ? copy(locale, "停止", "Stop")
+                      : copy(locale, "关闭", "Dismiss")}
+                  </button>
+                </div>
+                {batchError && <small title={batchError}>{batchError}</small>}
+              </div>
+            )}
+
+            <div className="trace-lite-projects">
+              {projectGroups.length === 0 ? (
+                <p className="trace-lite-muted">
+                  {copy(locale, "没有匹配的对话", "No matching conversations")}
+                </p>
+              ) : (
+                projectGroups.map((project) => {
+                  const collapsed =
+                    !query && !expandedProjects.has(project.key);
+                  const remaining = project.sessions.filter(
+                    (session) =>
+                      session.analysis_state !== "ready" &&
+                      Boolean(session.session_path),
+                  ).length;
+                  const isCurrentBatch =
+                    batchAnalysis?.projectKey === project.key;
+                  return (
+                    <section className="trace-lite-project" key={project.key}>
+                      <div className="trace-lite-project-heading">
+                        <button
+                          className="trace-lite-project-row"
+                          onClick={() =>
+                            setExpandedProjects((current) => {
+                              const next = new Set(current);
+                              if (next.has(project.key))
+                                next.delete(project.key);
+                              else next.add(project.key);
+                              return next;
+                            })
+                          }
+                          aria-expanded={!collapsed}
+                          title={project.path || project.name}
+                        >
+                          <ChevronRight
+                            className={`trace-lite-chevron${collapsed ? "" : " open"}`}
+                            aria-hidden="true"
+                          />
+                          {collapsed ? (
+                            <Folder
+                              className="trace-lite-folder-icon"
+                              aria-hidden="true"
+                            />
+                          ) : (
+                            <FolderOpen
+                              className="trace-lite-folder-icon"
+                              aria-hidden="true"
+                            />
+                          )}
+                          <span>
+                            <strong>{project.name}</strong>
+                            <small>
+                              {project.sessions.length}{" "}
+                              {copy(
+                                locale,
+                                "个对话",
+                                project.sessions.length === 1
+                                  ? "conversation"
+                                  : "conversations",
+                              )}
+                              {project.activeCount > 0 &&
+                                copy(
+                                  locale,
+                                  ` · ${project.activeCount} 活跃`,
+                                  ` · ${project.activeCount} active`,
+                                )}
+                            </small>
+                          </span>
+                          <em>
+                            {project.analyzedCount}/{project.sessions.length}
+                          </em>
+                        </button>
+                        {(remaining > 0 ||
+                          (isCurrentBatch &&
+                            batchAnalysis?.status === "running")) && (
+                          <button
+                            className="trace-project-analyze"
+                            type="button"
+                            disabled={
+                              batchAnalysis?.status === "running" &&
+                              !isCurrentBatch
+                            }
+                            onClick={() => requestProjectAnalysis(project)}
+                            aria-label={copy(
+                              locale,
+                              `分析 ${project.name} 的 ${remaining} 个对话`,
+                              `Analyze ${remaining} conversations in ${project.name}`,
+                            )}
+                          >
+                            {isCurrentBatch &&
+                            batchAnalysis?.status === "running"
+                              ? copy(locale, "停止", "Stop")
+                              : copy(
+                                  locale,
+                                  `分析 ${remaining}`,
+                                  `Analyze ${remaining}`,
+                                )}
+                          </button>
+                        )}
+                      </div>
+
+                      {!collapsed && (
+                        <div className="trace-lite-conversations">
+                          {project.sessions.map((session) => (
+                            <button
+                              key={session.id}
+                              className={
+                                session.id === selected?.id ? "selected" : ""
+                              }
+                              onClick={() => {
+                                setSelectedId(session.id);
+                                setOpenTurnId(null);
+                              }}
+                              title={conversationLabel(session, locale)}
+                            >
+                              <i
+                                className={`trace-status-dot ${session.status}`}
+                              />
+                              <span>
+                                <strong>
+                                  {conversationLabel(session, locale)}
+                                </strong>
+                                <small>
+                                  {formatDateTime(session.updated_at, locale)}
+                                  {session.is_subagent
+                                    ? copy(locale, " · 子任务", " · subtask")
+                                    : ""}
+                                </small>
+                              </span>
+                              <em>
+                                {session.analysis_state === "not_analyzed"
+                                  ? copy(locale, "分析", "Analyze")
+                                  : session.analysis_state === "stale"
+                                    ? copy(locale, "更新", "Update")
+                                    : formatReadableTokens(
+                                        session.total_tokens,
+                                      )}
+                              </em>
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </section>
+                  );
+                })
+              )}
+            </div>
           </aside>
         )}
 
@@ -2163,8 +2902,7 @@ export default function TraceView({
               <header className="trace-lite-session-header">
                 <div>
                   <span>
-                    {selected.project} ·{" "}
-                    <code>{selected.id.slice(0, 12)}</code>
+                    {selected.project} · <code>{selected.id.slice(0, 12)}</code>
                   </span>
                   <h2>{conversationLabel(selected, locale)}</h2>
                   <p>
@@ -2208,8 +2946,16 @@ export default function TraceView({
                   <div>
                     <strong>
                       {analyzingId === selected.id
-                        ? copy(locale, "正在分析 Session…", "Analyzing session…")
-                        : copy(locale, "正在读取分析结果…", "Loading analysis…")}
+                        ? copy(
+                            locale,
+                            "正在分析 Session…",
+                            "Analyzing session…",
+                          )
+                        : copy(
+                            locale,
+                            "正在读取分析结果…",
+                            "Loading analysis…",
+                          )}
                     </strong>
                     <p>
                       {copy(
@@ -2240,75 +2986,145 @@ export default function TraceView({
                 </div>
               )}
 
-              {!detailLoading && !detailError && !detail && (
-                <section className="trace-lite-analyze">
-                  <h3>
-                    {selected.analysis_state === "stale"
-                      ? copy(locale, "对话已更新，需要重新分析", "Conversation changed; analyze again")
-                      : copy(locale, "分析执行记录", "Analyze execution")}
-                  </h3>
-                  <p>
-                    {copy(
-                      locale,
-                      "读取这个对话的回合、消息、工具调用与 Token 记录。",
-                      "Read this conversation's turns, messages, tool calls, and token records.",
-                    )}
-                  </p>
-                  <dl>
-                    <div>
-                      <dt>{copy(locale, "项目目录", "Project directory")}</dt>
-                      <dd>
-                        <code>{selected.project_path || selected.project}</code>
-                      </dd>
+              {!detailLoading &&
+                !detailError &&
+                !detail &&
+                executionView === "protocol" && (
+                  <section className="trace-lite-raw-preview">
+                    <header>
+                      <div>
+                        <h3>{copy(locale, "原始记录", "Raw records")}</h3>
+                        <p>
+                          {copy(
+                            locale,
+                            "无需先分析即可读取 Session；App Server 与 Chat Bridge 是本次 X-Ray 进程的全局实时记录。",
+                            "Read the Session without analyzing it first. App Server and Chat Bridge are live, process-wide X-Ray records.",
+                          )}
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        className="secondary-action"
+                        onClick={() => setExecutionView("timeline")}
+                      >
+                        {copy(locale, "返回分析", "Back to analysis")}
+                      </button>
+                    </header>
+                    <TraceProtocolInspector
+                      sessionId={selected.id}
+                      locale={locale}
+                    />
+                  </section>
+                )}
+
+              {!detailLoading &&
+                !detailError &&
+                !detail &&
+                executionView !== "protocol" && (
+                  <section className="trace-lite-analyze">
+                    <h3>
+                      {selected.analysis_state === "stale"
+                        ? copy(
+                            locale,
+                            "对话已更新，需要重新分析",
+                            "Conversation changed; analyze again",
+                          )
+                        : copy(locale, "分析执行记录", "Analyze execution")}
+                    </h3>
+                    <p>
+                      {copy(
+                        locale,
+                        "读取这个对话的回合、消息、工具调用与 Token 记录。",
+                        "Read this conversation's turns, messages, tool calls, and token records.",
+                      )}
+                    </p>
+                    <dl>
+                      <div>
+                        <dt>{copy(locale, "项目目录", "Project directory")}</dt>
+                        <dd>
+                          <code>
+                            {selected.project_path || selected.project}
+                          </code>
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>{copy(locale, "最后更新", "Last updated")}</dt>
+                        <dd>{formatDateTime(selected.updated_at, locale)}</dd>
+                      </div>
+                      <div>
+                        <dt>Session ID</dt>
+                        <dd>
+                          <code>{selected.id}</code>
+                        </dd>
+                      </div>
+                    </dl>
+                    <div className="trace-lite-analyze-actions">
+                      <button
+                        type="button"
+                        className="primary-action"
+                        onClick={() => void analyzeSelected()}
+                        disabled={analyzingId !== null}
+                        aria-busy={analyzingId === selected.id}
+                      >
+                        {analyzingId === selected.id ? (
+                          <LoaderCircle
+                            className="spinning"
+                            aria-hidden="true"
+                          />
+                        ) : (
+                          <ScanSearch aria-hidden="true" />
+                        )}
+                        {analyzingId === selected.id
+                          ? copy(locale, "正在分析…", "Analyzing…")
+                          : copy(
+                              locale,
+                              "分析这个对话",
+                              "Analyze this conversation",
+                            )}
+                      </button>
+                      <button
+                        type="button"
+                        className="secondary-action"
+                        onClick={() => setExecutionView("protocol")}
+                      >
+                        <FileText aria-hidden="true" />
+                        {copy(locale, "查看原始记录", "View raw records")}
+                      </button>
                     </div>
-                    <div>
-                      <dt>{copy(locale, "最后更新", "Last updated")}</dt>
-                      <dd>{formatDateTime(selected.updated_at, locale)}</dd>
-                    </div>
-                    <div>
-                      <dt>Session ID</dt>
-                      <dd>
-                        <code>{selected.id}</code>
-                      </dd>
-                    </div>
-                  </dl>
-                  <button
-                    type="button"
-                    className="primary-action"
-                    onClick={() => void analyzeSelected()}
-                    disabled={analyzingId !== null}
-                    aria-busy={analyzingId === selected.id}
-                  >
-                    {analyzingId === selected.id ? (
-                      <LoaderCircle className="spinning" aria-hidden="true" />
-                    ) : (
-                      <ScanSearch aria-hidden="true" />
-                    )}
-                    {analyzingId === selected.id
-                      ? copy(locale, "正在分析…", "Analyzing…")
-                      : copy(locale, "分析这个对话", "Analyze this conversation")}
-                  </button>
-                </section>
-              )}
+                  </section>
+                )}
 
               {detail && (
                 <>
                   <section className="trace-lite-session-summary">
                     <span className="primary">
                       <small>{copy(locale, "总 Token", "Total tokens")}</small>
-                      <strong>{formatReadableTokens(selected.total_tokens)}</strong>
+                      <strong>
+                        {formatReadableTokens(selected.total_tokens)}
+                      </strong>
                       <em>{formatExactUsd(selected.estimated_cost_usd)}</em>
                     </span>
                     <span>
                       <small>{copy(locale, "回合", "Turns")}</small>
                       <strong>{detail.turns.length}</strong>
                       <em>
-                        {selected.tool_calls}{" "}
-                        {copy(locale, "次工具调用", "tool calls")}
+                        {actualToolCalls === selected.tool_calls
+                          ? copy(
+                              locale,
+                              `${actualToolCalls} 个可识别操作`,
+                              `${actualToolCalls} identified operations`,
+                            )
+                          : copy(
+                              locale,
+                              `${selected.tool_calls} 条工具记录 · ${actualToolCalls} 个可识别操作`,
+                              `${selected.tool_calls} tool records · ${actualToolCalls} identified operations`,
+                            )}
                       </em>
                     </span>
                     <span>
-                      <small>{copy(locale, "输入 / 缓存", "Input / cache")}</small>
+                      <small>
+                        {copy(locale, "输入 / 缓存", "Input / cache")}
+                      </small>
                       <strong>
                         {formatReadableTokens(selected.input_tokens)} /{" "}
                         {formatReadableTokens(selected.cached_input_tokens)}
@@ -2316,14 +3132,22 @@ export default function TraceView({
                       <em>{selected.cache_hit_percent.toFixed(1)}%</em>
                     </span>
                     <span>
-                      <small>{copy(locale, "输出 / 推理", "Output / reasoning")}</small>
+                      <small>
+                        {copy(locale, "输出 / 推理", "Output / reasoning")}
+                      </small>
                       <strong>
                         {formatReadableTokens(selected.output_tokens)} /{" "}
                         {formatReadableTokens(selected.reasoning_output_tokens)}
                       </strong>
                     </span>
                     <span>
-                      <small>{copy(locale, "上下文峰值 / 窗口", "Context peak / window")}</small>
+                      <small>
+                        {copy(
+                          locale,
+                          "上下文峰值 / 窗口",
+                          "Context peak / window",
+                        )}
+                      </small>
                       <strong>
                         {formatReadableTokens(contextPeak)} /{" "}
                         {contextWindow > 0
@@ -2349,60 +3173,162 @@ export default function TraceView({
                           )}
                         </p>
                       </div>
+                      <nav
+                        className="trace-execution-switch"
+                        aria-label={copy(
+                          locale,
+                          "执行记录视图",
+                          "Execution views",
+                        )}
+                      >
+                        <button
+                          type="button"
+                          className={
+                            executionView === "timeline" ? "selected" : ""
+                          }
+                          aria-pressed={executionView === "timeline"}
+                          onClick={() => setExecutionView("timeline")}
+                        >
+                          {copy(locale, "时序事件", "Timeline")}
+                        </button>
+                        <button
+                          type="button"
+                          className={
+                            executionView === "tools" ? "selected" : ""
+                          }
+                          aria-pressed={executionView === "tools"}
+                          onClick={() => setExecutionView("tools")}
+                        >
+                          {copy(locale, "调用统计", "Call statistics")}
+                          <b>{actualToolCalls}</b>
+                        </button>
+                        <button
+                          type="button"
+                          className={
+                            executionView === "protocol" ? "selected" : ""
+                          }
+                          aria-pressed={executionView === "protocol"}
+                          onClick={() => setExecutionView("protocol")}
+                        >
+                          {copy(locale, "原始记录", "Raw records")}
+                        </button>
+                      </nav>
                     </header>
 
-                    <nav
-                      className="trace-event-filters"
-                      aria-label={copy(
-                        locale,
-                        "筛选 Timeline 事件",
-                        "Filter timeline events",
-                      )}
-                    >
-                      {eventFilters
-                        .filter(
-                          (filter) =>
-                            filter === "all" || (eventCounts.get(filter) ?? 0) > 0,
-                        )
-                        .map((filter) => (
-                          <button
-                            key={filter}
-                            className={eventFilter === filter ? "selected" : ""}
-                            aria-pressed={eventFilter === filter}
-                            onClick={() => setEventFilter(filter)}
-                          >
-                            <span>{eventFilterLabel(filter, locale)}</span>
-                            <b>{eventCounts.get(filter) ?? 0}</b>
-                          </button>
-                        ))}
-                    </nav>
+                    {executionView === "timeline" ? (
+                      <>
+                        <nav
+                          className="trace-event-filters"
+                          aria-label={copy(
+                            locale,
+                            "筛选 Timeline 事件",
+                            "Filter timeline events",
+                          )}
+                        >
+                          {primaryEventFilters
+                            .filter(
+                              (filter) =>
+                                filter === "all" ||
+                                (eventCounts.get(filter) ?? 0) > 0,
+                            )
+                            .map((filter) => (
+                              <button
+                                key={filter}
+                                className={
+                                  eventFilter === filter ||
+                                  (filter === "tools" &&
+                                    isToolEventFilter(eventFilter))
+                                    ? "selected"
+                                    : ""
+                                }
+                                aria-pressed={
+                                  eventFilter === filter ||
+                                  (filter === "tools" &&
+                                    isToolEventFilter(eventFilter))
+                                }
+                                onClick={() => setEventFilter(filter)}
+                              >
+                                <span>{eventFilterLabel(filter, locale)}</span>
+                                <b>{eventCounts.get(filter) ?? 0}</b>
+                              </button>
+                            ))}
+                        </nav>
 
-                    {detail.turns.length === 0 ? (
-                      <p className="trace-lite-muted">
-                        {copy(
-                          locale,
-                          "这个 Session 没有可读取的回合。",
-                          "No readable turns in this session.",
+                        {isToolEventFilter(eventFilter) && (
+                          <nav
+                            className="trace-tool-event-filters"
+                            aria-label={copy(
+                              locale,
+                              "按工具类型筛选 Timeline 事件",
+                              "Filter timeline events by tool type",
+                            )}
+                          >
+                            <span>{copy(locale, "工具类型", "Tool type")}</span>
+                            <div>
+                              {toolEventFilters
+                                .filter(
+                                  (filter) =>
+                                    filter === "tools" ||
+                                    (eventCounts.get(filter) ?? 0) > 0,
+                                )
+                                .map((filter) => (
+                                  <button
+                                    type="button"
+                                    key={filter}
+                                    className={
+                                      eventFilter === filter ? "selected" : ""
+                                    }
+                                    aria-pressed={eventFilter === filter}
+                                    onClick={() => setEventFilter(filter)}
+                                  >
+                                    {toolEventFilterIcon(filter)}
+                                    <span>
+                                      {filter === "tools"
+                                        ? copy(locale, "全部工具", "All tools")
+                                        : eventFilterLabel(filter, locale)}
+                                    </span>
+                                    <b>{eventCounts.get(filter) ?? 0}</b>
+                                  </button>
+                                ))}
+                            </div>
+                          </nav>
                         )}
-                      </p>
+
+                        {detail.turns.length === 0 ? (
+                          <p className="trace-lite-muted">
+                            {copy(
+                              locale,
+                              "这个 Session 没有可读取的回合。",
+                              "No readable turns in this session.",
+                            )}
+                          </p>
+                        ) : (
+                          <div className="trace-lite-turn-list">
+                            {detail.turns.map((turn) => (
+                              <TurnTimeline
+                                key={turn.id}
+                                turn={turn}
+                                locale={locale}
+                                t={t}
+                                eventFilter={eventFilter}
+                                open={openTurnId === turn.id}
+                                onToggle={() =>
+                                  setOpenTurnId((current) =>
+                                    current === turn.id ? null : turn.id,
+                                  )
+                                }
+                              />
+                            ))}
+                          </div>
+                        )}
+                      </>
+                    ) : executionView === "tools" ? (
+                      <ToolUsageOverview turns={detail.turns} locale={locale} />
                     ) : (
-                      <div className="trace-lite-turn-list">
-                        {detail.turns.map((turn) => (
-                          <TurnTimeline
-                            key={turn.id}
-                            turn={turn}
-                            locale={locale}
-                            t={t}
-                            eventFilter={eventFilter}
-                            open={openTurnId === turn.id}
-                            onToggle={() =>
-                              setOpenTurnId((current) =>
-                                current === turn.id ? null : turn.id,
-                              )
-                            }
-                          />
-                        ))}
-                      </div>
+                      <TraceProtocolInspector
+                        sessionId={selected.id}
+                        locale={locale}
+                      />
                     )}
                   </section>
                 </>

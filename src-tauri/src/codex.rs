@@ -15,6 +15,7 @@ use serde_json::{Value, json};
 use thiserror::Error;
 
 use crate::local_usage::{LocalTodayUsage, scan_today_usage};
+use crate::protocol_capture::{ProtocolRecord, record_json};
 use crate::provider::ModelOption;
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(90);
@@ -226,6 +227,7 @@ pub struct AppServerClient {
     input: BufWriter<ChildStdin>,
     messages: Receiver<Value>,
     stderr_tail: Arc<Mutex<String>>,
+    protocol_pending: Arc<Mutex<BTreeMap<u64, (String, Instant)>>>,
     next_id: u64,
     codex_version: String,
     codex_binary: PathBuf,
@@ -263,12 +265,51 @@ impl AppServerClient {
             .ok_or(CodexError::MissingPipe("stderr"))?;
 
         let (message_tx, messages) = mpsc::channel();
+        let protocol_pending = Arc::new(Mutex::new(BTreeMap::<u64, (String, Instant)>::new()));
+        let response_pending = Arc::clone(&protocol_pending);
         thread::spawn(move || {
             for line in BufReader::new(output).lines().map_while(Result::ok) {
-                if let Ok(message) = serde_json::from_str::<Value>(&line)
-                    && message_tx.send(message).is_err()
-                {
-                    break;
+                if let Ok(message) = serde_json::from_str::<Value>(&line) {
+                    let response_id = message.get("id").and_then(Value::as_u64);
+                    let pending = response_id.and_then(|id| {
+                        response_pending
+                            .lock()
+                            .ok()
+                            .and_then(|mut pending| pending.remove(&id))
+                    });
+                    let method = message
+                        .get("method")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                        .or_else(|| pending.as_ref().map(|(method, _)| method.clone()));
+                    let correlation_id = response_id.map(|id| id.to_string());
+                    let duration_ms = pending
+                        .as_ref()
+                        .map(|(_, started)| started.elapsed().as_millis() as u64);
+                    let kind = if response_id.is_some() {
+                        if message.get("error").is_some() {
+                            "error"
+                        } else {
+                            "response"
+                        }
+                    } else {
+                        "notification"
+                    };
+                    record_json(
+                        ProtocolRecord {
+                            channel: "app_server",
+                            direction: "server_to_xray",
+                            kind,
+                            method: method.as_deref(),
+                            correlation_id: correlation_id.as_deref(),
+                            status: None,
+                            duration_ms,
+                        },
+                        &message,
+                    );
+                    if message_tx.send(message).is_err() {
+                        break;
+                    }
                 }
             }
         });
@@ -293,6 +334,7 @@ impl AppServerClient {
             input: BufWriter::new(input),
             messages,
             stderr_tail,
+            protocol_pending,
             next_id: 1,
             codex_version,
             codex_binary,
@@ -583,28 +625,47 @@ impl AppServerClient {
             "id": id,
             "params": params,
         });
-        self.write_message(method, &payload)?;
+        if let Ok(mut pending) = self.protocol_pending.lock() {
+            pending.insert(id, (method.to_string(), Instant::now()));
+        }
+        if let Err(error) = self.write_message(method, &payload) {
+            if let Ok(mut pending) = self.protocol_pending.lock() {
+                pending.remove(&id);
+            }
+            return Err(error);
+        }
 
         let started_at = Instant::now();
         loop {
-            let remaining =
-                timeout
-                    .checked_sub(started_at.elapsed())
-                    .ok_or_else(|| CodexError::Timeout {
-                        method: method.to_string(),
-                        seconds: timeout.as_secs(),
-                    })?;
-
-            let message = self.messages.recv_timeout(remaining).map_err(|error| {
-                if matches!(error, mpsc::RecvTimeoutError::Timeout) {
-                    CodexError::Timeout {
-                        method: method.to_string(),
-                        seconds: timeout.as_secs(),
+            let remaining = match timeout.checked_sub(started_at.elapsed()) {
+                Some(remaining) => remaining,
+                None => {
+                    if let Ok(mut pending) = self.protocol_pending.lock() {
+                        pending.remove(&id);
                     }
-                } else {
-                    CodexError::Disconnected(self.stderr())
+                    return Err(CodexError::Timeout {
+                        method: method.to_string(),
+                        seconds: timeout.as_secs(),
+                    });
                 }
-            })?;
+            };
+
+            let message = match self.messages.recv_timeout(remaining) {
+                Ok(message) => message,
+                Err(error) => {
+                    if let Ok(mut pending) = self.protocol_pending.lock() {
+                        pending.remove(&id);
+                    }
+                    return Err(if matches!(error, mpsc::RecvTimeoutError::Timeout) {
+                        CodexError::Timeout {
+                            method: method.to_string(),
+                            seconds: timeout.as_secs(),
+                        }
+                    } else {
+                        CodexError::Disconnected(self.stderr())
+                    });
+                }
+            };
 
             if message.get("id").and_then(Value::as_u64) != Some(id) {
                 continue;
@@ -641,6 +702,26 @@ impl AppServerClient {
     }
 
     fn write_message(&mut self, method: &str, payload: &Value) -> Result<(), CodexError> {
+        let correlation_id = payload
+            .get("id")
+            .and_then(Value::as_u64)
+            .map(|id| id.to_string());
+        record_json(
+            ProtocolRecord {
+                channel: "app_server",
+                direction: "xray_to_server",
+                kind: if correlation_id.is_some() {
+                    "request"
+                } else {
+                    "notification"
+                },
+                method: Some(method),
+                correlation_id: correlation_id.as_deref(),
+                status: None,
+                duration_ms: None,
+            },
+            payload,
+        );
         writeln!(self.input, "{payload}")
             .and_then(|_| self.input.flush())
             .map_err(|error| CodexError::Send {

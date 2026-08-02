@@ -83,6 +83,8 @@ Codex X-Ray 是 Codex 的用量与执行分析工具。它展示额度和 Token�
 
 按项目、对话和 Turn 浏览 Session，还原从用户输入、LLM 返回，到 CLI/MCP/Skill 调用、工具结果、Token 结算和回合结束的完整过程。上下文剖析会展示首次、峰值和末次模型输入，压缩边界与估算减少量，本地准备记录和明确的 Memory 使用证据；不会把上下文压缩误算成长期 Memory。
 
+“原始记录”无需先分析即可逐行核对 Session JSONL，同时可查看 X-Ray 自己的 App Server 消息，以及请求经过 Chat 兼容桥时完整的 Responses → Chat → Responses 流程。原生 Provider 的 HTTP 流量由 Codex 直接发送给上游，因此不会伪装成已抓取流量。
+
 ### 模型接入与 Codex 配置
 
 保存多套模型接入方案，每套独立记录模型、接口、协议和凭据，并可一键切换。原生 Responses 服务由 Codex 直连；OpenAI Chat 兼容服务通过本机兼容桥接入。常用 Codex 设置也可在 GUI 中修改，启用方案时会保留可恢复的上一状态。

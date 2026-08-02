@@ -4,6 +4,7 @@ mod cost_estimate;
 mod environment;
 mod local_usage;
 mod pricing;
+mod protocol_capture;
 mod provider;
 mod settings;
 mod storage;
@@ -24,6 +25,7 @@ use pricing::{
     PricingApplyRequest, PricingConfigSnapshot, activate_pricing_config, pricing_config_snapshot,
     reset_pricing_config as reset_pricing_config_file, save_pricing_config,
 };
+use protocol_capture::ProtocolCaptureSnapshot;
 use provider::{
     ProviderApplyRequest, ProviderSnapshot, ProviderTestResult, build_apply_edits,
     build_provider_snapshot, codex_catalog_capabilities, delete_credential,
@@ -40,9 +42,9 @@ use settings::{
 use storage::{health as storage_health, read_cache, write_cache};
 use tauri::{Manager, WindowEvent};
 use trace_analysis::{
-    ExtensionUsageSnapshot, TraceIndexCache, TraceSessionDetail, TraceSnapshot,
+    ExtensionUsageSnapshot, TraceIndexCache, TraceSessionDetail, TraceSnapshot, TraceSourcePage,
     analyze_trace_session_cached, build_extension_usage_cached, build_trace_catalog,
-    build_trace_snapshot_cached, get_trace_session_detail_cached,
+    build_trace_snapshot_cached, get_trace_session_detail_cached, read_trace_source_page,
 };
 
 struct UsageState {
@@ -506,6 +508,25 @@ async fn get_trace_session(
     })
     .await
     .map_err(|error| format!("执行解剖详情后台任务异常：{error}"))?
+}
+
+#[tauri::command]
+async fn get_trace_source(
+    session_id: String,
+    offset: usize,
+    limit: usize,
+) -> Result<TraceSourcePage, String> {
+    tauri::async_runtime::spawn_blocking(move || read_trace_source_page(&session_id, offset, limit))
+        .await
+        .map_err(|error| format!("Session 原始记录读取任务异常：{error}"))?
+}
+
+#[tauri::command]
+fn get_protocol_capture(
+    channel: Option<String>,
+    after_sequence: Option<u64>,
+) -> ProtocolCaptureSnapshot {
+    protocol_capture::snapshot(channel.as_deref(), after_sequence)
 }
 
 #[tauri::command]
@@ -1034,6 +1055,8 @@ pub fn run() {
             get_trace,
             get_trace_catalog,
             get_trace_session,
+            get_trace_source,
+            get_protocol_capture,
             analyze_trace_session,
             get_extension_usage,
             get_provider_config,
