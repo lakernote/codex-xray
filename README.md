@@ -47,6 +47,8 @@ Codex X-Ray is a local desktop workbench for understanding and controlling Codex
 - Use `/list` to switch tasks temporarily and `/status` to check the current target.
 - Never copy, fork, or create a conversation from an accidental message.
 
+[![WeChat remote control](docs/assets/remote-control.en.png)](docs/assets/remote-control.en.png)
+
 The channel runs only while Codex X-Ray is open. Closing the app stops WeChat and all X-Ray-owned local services; no background daemon or login item is installed.
 
 ### Model access and configuration

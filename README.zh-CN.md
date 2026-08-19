@@ -47,6 +47,8 @@ Codex X-Ray 是一款本地桌面工作台，用来理解和控制 Codex。它�
 - 用 `/list` 临时切换任务，用 `/status` 查看当前目标与进度。
 - 不会因为误发消息自动复制、分叉或新建会话。
 
+[![微信远程控制](docs/assets/remote-control.zh-CN.png)](docs/assets/remote-control.zh-CN.png)
+
 通道只在 Codex X-Ray 打开时运行。关闭应用会停止微信连接和 X-Ray 启动的本机服务；不会安装后台守护进程或开机启动项。
 
 ### 模型接入与配置
