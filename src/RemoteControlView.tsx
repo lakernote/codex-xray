@@ -250,6 +250,30 @@ export default function RemoteControlView({ locale }: { locale: Locale }) {
   const attachTask = async (threadId: string) => {
     setBusy(`attach-${threadId}`);
     setError(null);
+    const target = tasks.find((task) => task.id === threadId);
+    if (target) {
+      setSnapshot((current) =>
+        current
+          ? {
+              ...current,
+              attached_thread_id: target.id,
+              attached_thread_title: target.title,
+              attached_cwd: target.cwd,
+              control_ready: false,
+              control_backend: "none",
+              active_turn_id: null,
+              latest_activity: copy(
+                locale,
+                "正在后台唤醒 Codex Desktop 原任务…",
+                "Waking the original Codex Desktop task in the background…",
+              ),
+              agent_preview: null,
+              pending_approval: null,
+              last_error: null,
+            }
+          : current,
+      );
+    }
     try {
       setSnapshot(
         await invoke<RemoteChannelSnapshot>("attach_remote_task", { threadId }),
@@ -556,8 +580,8 @@ export default function RemoteControlView({ locale }: { locale: Locale }) {
                         (targetOccupied
                           ? copy(
                               locale,
-                              "请在 Codex Desktop 打开完全相同的任务后重新检测。X-Ray 不会回退创建副本或新会话。",
-                              "Open the exact same task in Codex Desktop, then retry. X-Ray will not fall back to a copy or a new task.",
+                              "X-Ray 会先自动唤醒并连接原任务；只有自动连接仍失败时，才需要手动打开完全相同的 Codex 任务。不会创建副本或新会话。",
+                              "X-Ray first wakes and connects the original task automatically. Open the exact Codex task manually only if automatic connection still fails. No copy or new task is created.",
                             )
                           : copy(
                               locale,
@@ -576,7 +600,9 @@ export default function RemoteControlView({ locale }: { locale: Locale }) {
                     ) : (
                       <RefreshCw aria-hidden="true" />
                     )}
-                    {copy(locale, "重新检测", "Check again")}
+                    {busy === `attach-${snapshot.attached_thread_id}`
+                      ? copy(locale, "正在自动连接", "Connecting automatically")
+                      : copy(locale, "重试自动连接", "Retry automatic connection")}
                   </button>
                 </div>
               )}
@@ -635,8 +661,8 @@ export default function RemoteControlView({ locale }: { locale: Locale }) {
             <li>
               {copy(
                 locale,
-                "在下方点击“控制”，或明确点击“新建并控制”",
-                "Click Control below, or explicitly click Create and control",
+                "点击“控制”会自动唤醒并连接 Codex 原任务；也可以明确“新建并控制”",
+                "Control automatically wakes and connects the original Codex task; you can also explicitly Create and control",
               )}
             </li>
             <li>
@@ -840,7 +866,7 @@ export default function RemoteControlView({ locale }: { locale: Locale }) {
                   </div>
                   <button
                     className="secondary-action"
-                    disabled={Boolean(busy)}
+                    disabled={Boolean(busy) || selectedAndReady}
                     onClick={() => void attachTask(task.id)}
                   >
                     {busy === `attach-${task.id}` ? (
@@ -850,9 +876,11 @@ export default function RemoteControlView({ locale }: { locale: Locale }) {
                     )}
                     {selectedAndReady
                       ? copy(locale, "正在控制", "Controlling")
-                      : selected
-                        ? copy(locale, "重新检测", "Check again")
-                        : copy(locale, "控制", "Control")}
+                      : busy === `attach-${task.id}`
+                        ? copy(locale, "正在自动连接", "Connecting automatically")
+                        : selected
+                          ? copy(locale, "重试自动连接", "Retry automatic connection")
+                          : copy(locale, "控制", "Control")}
                   </button>
                 </article>
               );

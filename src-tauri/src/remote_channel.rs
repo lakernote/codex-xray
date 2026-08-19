@@ -2,6 +2,7 @@ use std::collections::{HashSet, VecDeque};
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -35,6 +36,7 @@ const PROGRESS_FIRST_FEEDBACK: Duration = Duration::from_secs(10);
 const PROGRESS_MIN_INTERVAL: Duration = Duration::from_secs(20);
 const PROGRESS_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
 const DESKTOP_IPC_PROBE_ATTEMPTS: usize = 2;
+const DESKTOP_WAKE_RETRY_DELAYS_MS: [u64; 6] = [350, 650, 1_000, 1_500, 2_200, 3_000];
 static CLIENT_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, Serialize)]
@@ -618,6 +620,24 @@ impl RemoteChannelState {
         .map_err(|error| format!("读取 Codex 任务的后台操作失败：{error}"))?
     }
 
+    async fn probe_desktop_control(
+        &self,
+        thread_id: &str,
+        previous_thread_id: Option<&str>,
+    ) -> Result<Option<(String, DesktopThreadView)>, String> {
+        let desktop = Arc::clone(&self.desktop_ipc);
+        let thread_id = thread_id.to_string();
+        let previous_thread_id = previous_thread_id.map(ToOwned::to_owned);
+        tauri::async_runtime::spawn_blocking(move || {
+            let mut guard = desktop
+                .lock()
+                .map_err(|_| "Codex Desktop IPC 状态已损坏".to_string())?;
+            probe_desktop_thread(&mut guard, &thread_id, previous_thread_id.as_deref())
+        })
+        .await
+        .map_err(|error| format!("检测 Codex Desktop 原任务失败：{error}"))?
+    }
+
     pub async fn attach_thread(&self, requested_id: &str) -> Result<RemoteChannelSnapshot, String> {
         let requested_id = requested_id.trim().to_string();
         if requested_id.is_empty() {
@@ -644,6 +664,17 @@ impl RemoteChannelState {
             [] => return Err("没有找到匹配的 Codex 任务。".to_string()),
             _ => return Err("任务 ID 前缀不唯一，请提供更多字符。".to_string()),
         };
+        let already_controlled = self
+            .runtime
+            .read()
+            .map(|runtime| {
+                runtime.control_ready
+                    && runtime.attached_thread_id.as_deref() == Some(task.id.as_str())
+            })
+            .unwrap_or(false);
+        if already_controlled {
+            return Ok(self.snapshot());
+        }
         let (previous_thread_id, previous_backend) = self
             .runtime
             .read()
@@ -654,50 +685,93 @@ impl RemoteChannelState {
                 )
             })
             .unwrap_or_default();
-        let desktop = Arc::clone(&self.desktop_ipc);
         let desktop_thread_id = task.id.clone();
         let previous_desktop_thread = (previous_backend == "desktop_ipc")
             .then_some(previous_thread_id)
             .flatten();
-        let desktop_probe = tauri::async_runtime::spawn_blocking(move || {
-            let mut guard = desktop
-                .lock()
-                .map_err(|_| "Codex Desktop IPC 状态已损坏".to_string())?;
-            probe_desktop_thread(
-                &mut guard,
-                &desktop_thread_id,
-                previous_desktop_thread.as_deref(),
-            )
-        })
-        .await
-        .map_err(|error| format!("检测 Codex Desktop 原任务失败：{error}"))?;
-
-        let desktop_error = match desktop_probe {
-            Ok(Some((owner, view))) => {
-                let pending_approval = view.pending_request.as_ref().map(desktop_pending_approval);
-                let mut runtime = self
-                    .runtime
-                    .write()
-                    .map_err(|_| "微信通道状态已损坏".to_string())?;
-                runtime.attached_thread_id = Some(task.id);
-                runtime.attached_thread_title = Some(task.title);
-                runtime.attached_cwd = Some(task.cwd);
-                runtime.control_ready = true;
-                runtime.control_backend = "desktop_ipc".to_string();
-                runtime.desktop_owner_client_id = Some(owner);
-                runtime.active_turn_id = view.active_turn_id;
-                runtime.agent_preview = view.agent_preview.unwrap_or_default();
-                runtime.pending_approval = pending_approval;
-                runtime.latest_activity = Some("已连接 Codex Desktop 中的原任务".to_string());
-                runtime.last_error = None;
-                runtime.task_selection_active = false;
-                drop(runtime);
-                self.persist()?;
-                return Ok(self.snapshot());
+        {
+            let mut runtime = self
+                .runtime
+                .write()
+                .map_err(|_| "微信通道状态已损坏".to_string())?;
+            runtime.attached_thread_id = Some(task.id.clone());
+            runtime.attached_thread_title = Some(task.title.clone());
+            runtime.attached_cwd = Some(task.cwd.clone());
+            runtime.control_ready = false;
+            runtime.control_backend = "none".to_string();
+            runtime.desktop_owner_client_id = None;
+            runtime.active_turn_id = None;
+            runtime.agent_preview.clear();
+            runtime.pending_approval = None;
+            runtime.latest_activity = Some("正在检测 Codex Desktop 原任务…".to_string());
+            runtime.last_error = None;
+            runtime.task_selection_active = false;
+        }
+        let initial_probe = self
+            .probe_desktop_control(&desktop_thread_id, previous_desktop_thread.as_deref())
+            .await;
+        let mut desktop_error = None;
+        let mut desktop_connection = match initial_probe {
+            Ok(connection) => connection,
+            Err(error) => {
+                desktop_error = Some(error);
+                None
             }
-            Ok(None) => None,
-            Err(error) => Some(error),
         };
+
+        if desktop_connection.is_none() {
+            if let Ok(mut runtime) = self.runtime.write() {
+                runtime.latest_activity =
+                    Some("正在后台唤醒 Codex Desktop 中的原任务…".to_string());
+            }
+
+            match launch_codex_thread(&desktop_thread_id) {
+                Ok(()) => {
+                    for delay_ms in DESKTOP_WAKE_RETRY_DELAYS_MS {
+                        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                        match self
+                            .probe_desktop_control(
+                                &desktop_thread_id,
+                                previous_desktop_thread.as_deref(),
+                            )
+                            .await
+                        {
+                            Ok(Some(connection)) => {
+                                desktop_connection = Some(connection);
+                                desktop_error = None;
+                                break;
+                            }
+                            Ok(None) => {}
+                            Err(error) => desktop_error = Some(error),
+                        }
+                    }
+                }
+                Err(error) => desktop_error = Some(error),
+            }
+        }
+
+        if let Some((owner, view)) = desktop_connection {
+            let pending_approval = view.pending_request.as_ref().map(desktop_pending_approval);
+            let mut runtime = self
+                .runtime
+                .write()
+                .map_err(|_| "微信通道状态已损坏".to_string())?;
+            runtime.attached_thread_id = Some(task.id);
+            runtime.attached_thread_title = Some(task.title);
+            runtime.attached_cwd = Some(task.cwd);
+            runtime.control_ready = true;
+            runtime.control_backend = "desktop_ipc".to_string();
+            runtime.desktop_owner_client_id = Some(owner);
+            runtime.active_turn_id = view.active_turn_id;
+            runtime.agent_preview = view.agent_preview.unwrap_or_default();
+            runtime.pending_approval = pending_approval;
+            runtime.latest_activity = Some("已自动连接 Codex Desktop 中的原任务".to_string());
+            runtime.last_error = None;
+            runtime.task_selection_active = false;
+            drop(runtime);
+            self.persist()?;
+            return Ok(self.snapshot());
+        }
         let active_elsewhere = matches!(
             task.status.as_str(),
             "running" | "waiting_approval" | "waiting_input"
@@ -2654,12 +2728,12 @@ fn probe_desktop_thread(
 }
 
 fn occupied_activity() -> String {
-    "任务写入权仍由 Codex Desktop 持有，但当前尚未建立 IPC 控制；X-Ray 未创建副本或新会话"
+    "X-Ray 已尝试自动唤醒原任务，但写入权仍由 Codex Desktop 持有，IPC 尚未建立；未创建副本或新会话"
         .to_string()
 }
 
 fn occupied_weixin_message() -> &'static str {
-    "该任务仍由 Codex Desktop 持有，但 X-Ray 尚未通过本机 IPC 建立同任务控制。请在 Codex Desktop 打开完全相同的任务，再回到 X-Ray 点击“重新检测”。本次没有创建副本或新会话。"
+    "X-Ray 已尝试自动唤醒这个 Codex Desktop 原任务，但尚未通过本机 IPC 建立控制。请回到 Mac，在 X-Ray 点击“重试自动连接”；如果仍失败，再手动打开完全相同的 Codex 任务。本次没有创建副本或新会话。"
 }
 
 fn desktop_control_unavailable_message(error: Option<&str>) -> String {
@@ -2667,12 +2741,54 @@ fn desktop_control_unavailable_message(error: Option<&str>) -> String {
         .map(str::trim)
         .filter(|error| !error.is_empty())
         .map(|error| format!(" IPC 详情：{}", sanitize_weixin_system_text(error, 500)))
-        .unwrap_or_else(|| {
-            " Desktop 界面可能尚未打开完全相同的任务，或者 owner 尚未完成注册。".to_string()
-        });
+        .unwrap_or_else(|| " Codex Desktop 没有及时注册这个任务的 owner。".to_string());
     format!(
-        "任务写入权仍由 Codex Desktop 持有，但 X-Ray 尚未建立同任务控制。{detail}请打开完全相同的 Desktop 任务后重新检测；X-Ray 没有创建副本或新会话。"
+        "X-Ray 已尝试在后台自动打开这个 Codex Desktop 原任务，但尚未建立同任务控制。{detail}请重试自动连接；如果仍失败，再手动打开完全相同的 Desktop 任务。X-Ray 没有创建副本或新会话。"
     )
+}
+
+fn codex_thread_deep_link(thread_id: &str) -> Result<String, String> {
+    let thread_id = thread_id.trim();
+    if thread_id.is_empty()
+        || thread_id.len() > 256
+        || !thread_id
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+    {
+        return Err("Codex 任务 ID 无法安全用于自动唤醒".to_string());
+    }
+    Ok(format!("codex://threads/{thread_id}"))
+}
+
+#[cfg(target_os = "macos")]
+fn launch_codex_thread(thread_id: &str) -> Result<(), String> {
+    let url = codex_thread_deep_link(thread_id)?;
+    Command::new("open")
+        .arg("-g")
+        .arg(&url)
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("无法在后台唤醒 Codex Desktop 原任务：{error}"))
+}
+
+#[cfg(target_os = "windows")]
+fn launch_codex_thread(thread_id: &str) -> Result<(), String> {
+    let url = codex_thread_deep_link(thread_id)?;
+    Command::new("cmd")
+        .args(["/C", "start", "", &url])
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("无法唤醒 Codex Desktop 原任务：{error}"))
+}
+
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+fn launch_codex_thread(thread_id: &str) -> Result<(), String> {
+    let url = codex_thread_deep_link(thread_id)?;
+    Command::new("xdg-open")
+        .arg(&url)
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("无法唤醒 Codex Desktop 原任务：{error}"))
 }
 
 fn selected_task_message(snapshot: &RemoteChannelSnapshot) -> String {
@@ -3352,9 +3468,20 @@ mod tests {
     fn desktop_connection_errors_are_reported_without_guessing_a_version_problem() {
         let message = desktop_control_unavailable_message(Some("读取 IPC 内容失败: closed"));
         assert!(message.contains("读取 IPC 内容失败: closed"));
-        assert!(message.contains("重新检测"));
+        assert!(message.contains("重试自动连接"));
         assert!(message.contains("没有创建副本或新会话"));
         assert!(!message.contains("版本不兼容"));
+    }
+
+    #[test]
+    fn codex_thread_deep_links_only_accept_safe_task_ids() {
+        assert_eq!(
+            codex_thread_deep_link("019fea56-2aa8-7101-aadb-d7fd340fc913").unwrap(),
+            "codex://threads/019fea56-2aa8-7101-aadb-d7fd340fc913"
+        );
+        assert!(codex_thread_deep_link("../settings").is_err());
+        assert!(codex_thread_deep_link("thread\nopen").is_err());
+        assert!(codex_thread_deep_link("").is_err());
     }
 
     #[test]
@@ -3492,5 +3619,88 @@ mod tests {
         drop(channel);
         drop(runtime);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[ignore = "sends a real WeChat reply and requires CODEX_XRAY_LIVE_APP_DATA"]
+    fn relays_a_live_wechat_prompt_through_the_exact_desktop_task() {
+        let app_data = PathBuf::from(
+            std::env::var("CODEX_XRAY_LIVE_APP_DATA")
+                .expect("set CODEX_XRAY_LIVE_APP_DATA to the X-Ray app data directory"),
+        );
+        let config = read_config(&app_data.join("remote-channel.json")).unwrap();
+        let thread_id = config
+            .attached_thread_id
+            .expect("select a Desktop task in X-Ray before running the live test");
+        let owner_user_id = config
+            .owner_user_id
+            .expect("bind a WeChat user before running the live test");
+        let channel = RemoteChannelState::load(
+            &app_data,
+            Arc::new(Mutex::new(None)),
+            app_data.join("codex-state"),
+        )
+        .unwrap();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        runtime.block_on(async {
+            let attached = channel.attach_thread(&thread_id).await.unwrap();
+            assert_eq!(attached.control_backend, "desktop_ipc");
+            assert!(attached.control_ready);
+
+            let message: WeixinMessage = serde_json::from_value(json!({
+                "client_id": next_client_id(),
+                "message_type": 1,
+                "group_id": "",
+                "from_user_id": owner_user_id,
+                "item_list": [{
+                    "type": 1,
+                    "text_item": {
+                        "text": "这是 X-Ray 端到端测试。请只回复 XRAY_E2E_OK，不要修改文件。"
+                    }
+                }]
+            }))
+            .unwrap();
+            channel.handle_inbound(message).await.unwrap();
+            let turn_id = channel
+                .snapshot()
+                .active_turn_id
+                .expect("the live prompt did not start a Codex turn");
+
+            let deadline = Instant::now() + Duration::from_secs(180);
+            loop {
+                let snapshot = channel.snapshot();
+                if snapshot.active_turn_id.is_none() {
+                    assert!(snapshot.last_outbound_at.is_some());
+                    assert!(snapshot.last_error.is_none(), "{:?}", snapshot.last_error);
+                    assert!(
+                        snapshot
+                            .latest_activity
+                            .as_deref()
+                            .is_some_and(|activity| activity.contains("完成")),
+                        "unexpected final activity: {:?}",
+                        snapshot.latest_activity
+                    );
+                    let session_path = channel
+                        .session_path_for_thread(&thread_id)
+                        .await
+                        .expect("live task session path was not found");
+                    assert!(
+                        matches!(
+                            session_turn_outcome(&session_path, &turn_id),
+                            Some(SessionTurnOutcome::Completed(text))
+                                if text.contains("XRAY_E2E_OK")
+                        ),
+                        "Desktop session did not contain the expected final reply"
+                    );
+                    break;
+                }
+                assert!(Instant::now() < deadline, "live WeChat relay timed out");
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        });
     }
 }
