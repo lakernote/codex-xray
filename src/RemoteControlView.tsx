@@ -259,6 +259,7 @@ export default function RemoteControlView({ locale }: { locale: Locale }) {
               attached_thread_id: target.id,
               attached_thread_title: target.title,
               attached_cwd: target.cwd,
+              control_status: "connecting",
               control_ready: false,
               control_backend: "none",
               active_turn_id: null,
@@ -333,12 +334,9 @@ export default function RemoteControlView({ locale }: { locale: Locale }) {
     () => matchingTasks.slice(0, MAX_RENDERED_TASKS),
     [matchingTasks],
   );
-  const targetOccupied = Boolean(
-    snapshot?.attached_thread_id &&
-      !snapshot.control_ready &&
-      (snapshot.latest_activity?.includes("owner") ||
-        snapshot.latest_activity?.includes("IPC")),
-  );
+  const targetSaved = snapshot?.control_status === "saved";
+  const targetConnecting = snapshot?.control_status === "connecting";
+  const targetUnavailable = snapshot?.control_status === "unavailable";
 
   if (loading && !snapshot) {
     return (
@@ -529,11 +527,15 @@ export default function RemoteControlView({ locale }: { locale: Locale }) {
                   ? snapshot.control_backend === "desktop_ipc"
                     ? copy(locale, "Desktop 原任务可控", "Desktop task controllable")
                     : copy(locale, "X-Ray 独立任务", "X-Ray-owned task")
-                  : targetOccupied
-                    ? copy(locale, "IPC 未连接", "IPC not connected")
-                    : snapshot.last_error
-                      ? copy(locale, "暂不可用", "Unavailable")
-                      : copy(locale, "正在检测", "Checking")}
+                  : targetSaved
+                    ? copy(locale, "目标已保存", "Target saved")
+                    : targetConnecting
+                      ? copy(locale, "正在连接", "Connecting")
+                      : targetUnavailable
+                        ? copy(locale, "IPC 未连接", "IPC not connected")
+                        : snapshot.last_error
+                          ? copy(locale, "暂不可用", "Unavailable")
+                          : copy(locale, "正在检测", "Checking")}
               </span>
             )}
           </header>
@@ -563,31 +565,49 @@ export default function RemoteControlView({ locale }: { locale: Locale }) {
                   <CircleAlert aria-hidden="true" />
                   <div>
                     <strong>
-                      {targetOccupied
+                      {targetSaved
                         ? copy(
                             locale,
-                            "尚未连接 Codex Desktop 原任务",
-                            "Not connected to the original Desktop task",
+                            "控制目标已保存，Codex 不会随 X-Ray 启动",
+                            "Control target saved; Codex will not start with X-Ray",
                           )
-                        : copy(
-                            locale,
-                            "X-Ray 暂时无法控制这个任务",
-                            "X-Ray cannot control this task yet",
-                          )}
+                        : targetConnecting
+                          ? copy(
+                              locale,
+                              "正在连接 Codex Desktop 原任务",
+                              "Connecting to the original Codex Desktop task",
+                            )
+                          : targetUnavailable
+                            ? copy(
+                                locale,
+                                "尚未连接 Codex Desktop 原任务",
+                                "Not connected to the original Desktop task",
+                              )
+                            : copy(
+                                locale,
+                                "X-Ray 暂时无法控制这个任务",
+                                "X-Ray cannot control this task yet",
+                              )}
                     </strong>
                     <span>
                       {snapshot.last_error ??
-                        (targetOccupied
+                        (targetSaved
                           ? copy(
                               locale,
-                              "X-Ray 会先自动唤醒并连接原任务；只有自动连接仍失败时，才需要手动打开完全相同的 Codex 任务。不会创建副本或新会话。",
-                              "X-Ray first wakes and connects the original task automatically. Open the exact Codex task manually only if automatic connection still fails. No copy or new task is created.",
+                              "收到微信普通文字或点击下方按钮时，X-Ray 才会自动启动 Codex 并连接原任务。不会创建副本或新会话。",
+                              "X-Ray starts Codex and connects the original task only after a WeChat message or the button below. No copy or new task is created.",
                             )
-                          : copy(
-                              locale,
-                              "正在确认任务是否可以控制，请稍后重新检测。",
-                              "Checking whether this task can be controlled. Try again shortly.",
-                            ))}
+                          : targetUnavailable
+                            ? copy(
+                                locale,
+                                "X-Ray 会先自动唤醒并连接原任务；只有自动连接仍失败时，才需要手动打开完全相同的 Codex 任务。不会创建副本或新会话。",
+                                "X-Ray first wakes and connects the original task automatically. Open the exact Codex task manually only if automatic connection still fails. No copy or new task is created.",
+                              )
+                            : copy(
+                                locale,
+                                "正在确认任务是否可以控制，请稍后重新检测。",
+                                "Checking whether this task can be controlled. Try again shortly.",
+                              ))}
                     </span>
                   </div>
                   <button
@@ -602,7 +622,9 @@ export default function RemoteControlView({ locale }: { locale: Locale }) {
                     )}
                     {busy === `attach-${snapshot.attached_thread_id}`
                       ? copy(locale, "正在自动连接", "Connecting automatically")
-                      : copy(locale, "重试自动连接", "Retry automatic connection")}
+                      : targetSaved
+                        ? copy(locale, "启动 Codex 并控制", "Start Codex and control")
+                        : copy(locale, "重试自动连接", "Retry automatic connection")}
                   </button>
                 </div>
               )}
@@ -879,7 +901,9 @@ export default function RemoteControlView({ locale }: { locale: Locale }) {
                       : busy === `attach-${task.id}`
                         ? copy(locale, "正在自动连接", "Connecting automatically")
                         : selected
-                          ? copy(locale, "重试自动连接", "Retry automatic connection")
+                          ? snapshot?.control_status === "saved"
+                            ? copy(locale, "控制", "Control")
+                            : copy(locale, "重试自动连接", "Retry automatic connection")
                           : copy(locale, "控制", "Control")}
                   </button>
                 </article>

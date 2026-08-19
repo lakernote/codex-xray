@@ -383,6 +383,13 @@ export type RemoteChannelSnapshot = {
   attached_thread_id: string | null;
   attached_thread_title: string | null;
   attached_cwd: string | null;
+  control_status:
+    | "unselected"
+    | "saved"
+    | "connecting"
+    | "ready"
+    | "unavailable"
+    | string;
   control_ready: boolean;
   control_backend: "desktop_ipc" | "xray_app_server" | "none" | string;
   active_turn_id: string | null;
