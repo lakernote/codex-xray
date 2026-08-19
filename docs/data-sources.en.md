@@ -204,9 +204,10 @@ Codex X-Ray:
 - stores only bounded, redacted tool-argument, command, and script summaries for timelines the user explicitly analyzes;
 - does not modify sessions or Codex databases;
 - updates only user-selected configuration keys through official `config/batchWrite` after a diff preview and explicit confirmation;
-- does not read or store Provider API keys, only the selected environment-variable name;
+- stores a directly entered Provider API key in a user-only file under `~/.codex/codex-xray/credentials/`, or reads the selected environment variable transiently; the key is not written to configuration, SQLite, logs, the webview, or process arguments;
 - stores only user-entered model rates in its own `pricing-config.json` and never changes Codex billing or account data;
-- does not proxy or intercept Codex requests;
+- lets native Responses traffic go directly from Codex to the provider; only a Chat provider explicitly selected by the user is translated through X-Ray's loopback bridge;
+- sends prompts, replies, progress, and approval summaries through WeChat only when the owner enables the remote channel; system-generated WeChat messages shorten local paths and redact common credential forms;
 - does not upload local analysis;
 - writes only its own caches and indexes in Codex X-Ray app data.
 

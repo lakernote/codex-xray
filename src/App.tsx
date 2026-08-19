@@ -10,6 +10,7 @@ import {
   CircleHelp,
   LoaderCircle,
   Moon,
+  RadioTower,
   RefreshCw,
   ScanSearch,
   SlidersHorizontal,
@@ -45,6 +46,7 @@ import {
   type Translator,
 } from "./i18n";
 import ProviderView from "./ProviderView";
+import RemoteControlView from "./RemoteControlView";
 import PricingSettings from "./PricingSettings";
 import ProjectUsageView from "./ProjectUsageView";
 import TraceView from "./TraceView";
@@ -68,7 +70,7 @@ type UsageReport = "overview" | "daily" | "monthly" | "projects" | "models";
 type HistoryDisplay = "table" | "trend";
 type HistoryOrder = "desc" | "asc";
 type UsageRefreshMode = "initial" | "background" | "manual";
-type ActiveView = "usage" | "trace" | "access" | "console";
+type ActiveView = "usage" | "trace" | "remote" | "access" | "console";
 
 const USAGE_BOOT_CACHE_KEY = "codex-xray.usage-snapshot.v1";
 const COST_BOOT_CACHE_KEY = "codex-xray.cost-snapshot.v2";
@@ -2007,6 +2009,14 @@ function App() {
             {t("nav.trace")}
           </button>
           <button
+            className={`nav-item${activeView === "remote" ? " active" : ""}`}
+            aria-current={activeView === "remote" ? "page" : undefined}
+            onClick={() => setActiveView("remote")}
+          >
+            <RadioTower className="nav-icon" aria-hidden="true" />
+            {t("nav.remote")}
+          </button>
+          <button
             className={`nav-item${activeView === "access" ? " active" : ""}`}
             aria-current={activeView === "access" ? "page" : undefined}
             onClick={() => {
@@ -2097,6 +2107,7 @@ function App() {
           onRefresh={() => void loadTrace()}
         />
       )}
+      {activeView === "remote" && <RemoteControlView locale={locale} />}
       {activeView === "usage" && (
       <main
         ref={usageWorkspaceRef}

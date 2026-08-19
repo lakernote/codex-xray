@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::env;
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
@@ -20,9 +20,9 @@ use crate::provider::ModelOption;
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(90);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-const THREAD_METADATA_SCAN_INTERVAL: Duration = Duration::from_secs(60);
 const THREAD_PAGE_LIMIT: usize = 200;
 const MAX_THREAD_PAGES: usize = 100;
+const MAX_DEFERRED_MESSAGES: usize = 4_096;
 
 #[derive(Debug, Error)]
 pub enum CodexError {
@@ -226,12 +226,12 @@ pub struct AppServerClient {
     child: Child,
     input: BufWriter<ChildStdin>,
     messages: Receiver<Value>,
+    deferred_messages: VecDeque<Value>,
     stderr_tail: Arc<Mutex<String>>,
     protocol_pending: Arc<Mutex<BTreeMap<u64, (String, Instant)>>>,
     next_id: u64,
     codex_version: String,
     codex_binary: PathBuf,
-    last_thread_metadata_scan: Option<Instant>,
 }
 
 impl AppServerClient {
@@ -271,22 +271,27 @@ impl AppServerClient {
             for line in BufReader::new(output).lines().map_while(Result::ok) {
                 if let Ok(message) = serde_json::from_str::<Value>(&line) {
                     let response_id = message.get("id").and_then(Value::as_u64);
-                    let pending = response_id.and_then(|id| {
-                        response_pending
-                            .lock()
-                            .ok()
-                            .and_then(|mut pending| pending.remove(&id))
-                    });
-                    let method = message
-                        .get("method")
-                        .and_then(Value::as_str)
+                    let server_method = message.get("method").and_then(Value::as_str);
+                    // App Server can issue requests with its own `id`. Only messages without a
+                    // method are responses to requests sent by X-Ray.
+                    let pending = response_id
+                        .filter(|_| server_method.is_none())
+                        .and_then(|id| {
+                            response_pending
+                                .lock()
+                                .ok()
+                                .and_then(|mut pending| pending.remove(&id))
+                        });
+                    let method = server_method
                         .map(str::to_string)
                         .or_else(|| pending.as_ref().map(|(method, _)| method.clone()));
                     let correlation_id = response_id.map(|id| id.to_string());
                     let duration_ms = pending
                         .as_ref()
                         .map(|(_, started)| started.elapsed().as_millis() as u64);
-                    let kind = if response_id.is_some() {
+                    let kind = if server_method.is_some() && response_id.is_some() {
+                        "request"
+                    } else if response_id.is_some() {
                         if message.get("error").is_some() {
                             "error"
                         } else {
@@ -333,12 +338,12 @@ impl AppServerClient {
             child,
             input: BufWriter::new(input),
             messages,
+            deferred_messages: VecDeque::new(),
             stderr_tail,
             protocol_pending,
             next_id: 1,
             codex_version,
             codex_binary,
-            last_thread_metadata_scan: None,
         };
 
         client.request_with_timeout(
@@ -439,77 +444,52 @@ impl AppServerClient {
     }
 
     pub fn fetch_thread_metadata(&mut self) -> Result<Vec<ThreadMetadata>, CodexError> {
-        let use_cached_metadata = self
-            .last_thread_metadata_scan
-            .is_some_and(|scanned| scanned.elapsed() < THREAD_METADATA_SCAN_INTERVAL);
-        let scan_modes: &[bool] = if use_cached_metadata {
-            &[true, false]
-        } else {
-            &[false]
-        };
+        let mut cursor: Option<String> = None;
+        let mut threads = Vec::new();
+        let mut seen_cursors = HashSet::new();
+        let mut pages_read = 0usize;
 
-        for &use_state_db_only in scan_modes {
-            let mut cursor: Option<String> = None;
-            let mut threads = Vec::new();
-            let mut seen_cursors = HashSet::new();
-            let mut pages_read = 0usize;
-
-            loop {
-                let value = self.request_with_timeout(
-                    "thread/list",
-                    json!({
-                        "cursor": cursor,
-                        "limit": THREAD_PAGE_LIMIT,
-                        "sortKey": "updated_at",
-                        "sortDirection": "desc",
-                        "useStateDbOnly": use_state_db_only
-                    }),
-                    STARTUP_TIMEOUT,
-                )?;
-                let page =
-                    serde_json::from_value::<RawThreadListResponse>(value).map_err(|error| {
-                        CodexError::InvalidResponse {
-                            method: "thread/list".to_string(),
-                            message: error.to_string(),
-                        }
-                    })?;
-
-                threads.extend(page.data.into_iter().map(|thread| {
-                    ThreadMetadata {
-                        id: thread.id,
-                        name: thread
-                            .name
-                            .map(|name| name.trim().to_string())
-                            .filter(|name| !name.is_empty()),
-                        cwd: thread.cwd,
-                        status: normalize_thread_status(&thread.status),
-                        path: thread.path,
-                        created_at: thread.created_at,
-                        updated_at: thread.updated_at,
-                        parent_thread_id: thread.parent_thread_id,
-                    }
-                }));
-
-                pages_read += 1;
-                let Some(next_cursor) = page.next_cursor else {
-                    break;
-                };
-                if pages_read >= MAX_THREAD_PAGES || !seen_cursors.insert(next_cursor.clone()) {
-                    break;
+        loop {
+            let value = self.request_with_timeout(
+                "thread/list",
+                thread_list_params(cursor.as_deref()),
+                STARTUP_TIMEOUT,
+            )?;
+            let page = serde_json::from_value::<RawThreadListResponse>(value).map_err(|error| {
+                CodexError::InvalidResponse {
+                    method: "thread/list".to_string(),
+                    message: error.to_string(),
                 }
-                cursor = Some(next_cursor);
-            }
+            })?;
 
-            if !threads.is_empty() || !use_state_db_only {
-                supplement_thread_metadata_from_local_sessions(&mut threads);
-                if !use_state_db_only {
-                    self.last_thread_metadata_scan = Some(Instant::now());
+            threads.extend(page.data.into_iter().map(|thread| {
+                ThreadMetadata {
+                    id: thread.id,
+                    name: thread
+                        .name
+                        .map(|name| name.trim().to_string())
+                        .filter(|name| !name.is_empty()),
+                    cwd: thread.cwd,
+                    status: normalize_thread_status(&thread.status),
+                    path: thread.path,
+                    created_at: thread.created_at,
+                    updated_at: thread.updated_at,
+                    parent_thread_id: thread.parent_thread_id,
                 }
-                return Ok(threads);
+            }));
+
+            pages_read += 1;
+            let Some(next_cursor) = page.next_cursor else {
+                break;
+            };
+            if pages_read >= MAX_THREAD_PAGES || !seen_cursors.insert(next_cursor.clone()) {
+                break;
             }
+            cursor = Some(next_cursor);
         }
 
-        Ok(Vec::new())
+        supplement_thread_metadata_from_local_sessions(&mut threads);
+        Ok(threads)
     }
 
     pub fn read_config(&mut self) -> Result<Value, CodexError> {
@@ -607,6 +587,118 @@ impl AppServerClient {
         )
     }
 
+    pub fn start_remote_thread(&mut self, cwd: &Path) -> Result<String, CodexError> {
+        let value = self.request("thread/start", remote_thread_start_params(cwd))?;
+        response_nested_id("thread/start", &value, "thread")
+    }
+
+    pub fn resume_remote_thread(&mut self, thread_id: &str) -> Result<String, CodexError> {
+        let value = self.request("thread/resume", remote_thread_resume_params(thread_id))?;
+        response_nested_id("thread/resume", &value, "thread")
+    }
+
+    pub fn attach_remote_thread(&mut self, thread_id: &str) -> Result<String, CodexError> {
+        self.resume_remote_thread(thread_id)
+    }
+
+    pub fn start_remote_turn(
+        &mut self,
+        thread_id: &str,
+        prompt: &str,
+        client_message_id: Option<&str>,
+    ) -> Result<String, CodexError> {
+        let value = self.request(
+            "turn/start",
+            json!({
+                "threadId": thread_id,
+                "input": [{
+                    "type": "text",
+                    "text": prompt,
+                    "text_elements": []
+                }],
+                "clientUserMessageId": client_message_id,
+                "approvalPolicy": "on-request"
+            }),
+        )?;
+        response_nested_id("turn/start", &value, "turn")
+    }
+
+    pub fn steer_remote_turn(
+        &mut self,
+        thread_id: &str,
+        turn_id: &str,
+        prompt: &str,
+        client_message_id: Option<&str>,
+    ) -> Result<(), CodexError> {
+        self.request(
+            "turn/steer",
+            json!({
+                "threadId": thread_id,
+                "expectedTurnId": turn_id,
+                "input": [{
+                    "type": "text",
+                    "text": prompt,
+                    "text_elements": []
+                }],
+                "clientUserMessageId": client_message_id
+            }),
+        )?;
+        Ok(())
+    }
+
+    pub fn interrupt_remote_turn(
+        &mut self,
+        thread_id: &str,
+        turn_id: &str,
+    ) -> Result<(), CodexError> {
+        self.request(
+            "turn/interrupt",
+            json!({
+                "threadId": thread_id,
+                "turnId": turn_id
+            }),
+        )?;
+        Ok(())
+    }
+
+    pub fn receive_remote_event(&mut self, timeout: Duration) -> Result<Option<Value>, CodexError> {
+        if let Some(message) = self.deferred_messages.pop_front() {
+            return Ok(Some(message));
+        }
+        match self.messages.recv_timeout(timeout) {
+            Ok(message) => Ok(Some(message)),
+            Err(mpsc::RecvTimeoutError::Timeout) => Ok(None),
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                Err(CodexError::Disconnected(self.stderr()))
+            }
+        }
+    }
+
+    pub fn respond_to_server_request(
+        &mut self,
+        id: Value,
+        result: Value,
+    ) -> Result<(), CodexError> {
+        let payload = json!({ "id": id, "result": result });
+        self.write_protocol_message("server/request/response", "response", &payload)
+    }
+
+    pub fn respond_to_server_request_error(
+        &mut self,
+        id: Value,
+        code: i64,
+        message: &str,
+    ) -> Result<(), CodexError> {
+        let payload = json!({
+            "id": id,
+            "error": {
+                "code": code,
+                "message": message
+            }
+        });
+        self.write_protocol_message("server/request/response", "error", &payload)
+    }
+
     fn request(&mut self, method: &str, params: Value) -> Result<Value, CodexError> {
         self.request_with_timeout(method, params, REQUEST_TIMEOUT)
     }
@@ -637,6 +729,9 @@ impl AppServerClient {
 
         let started_at = Instant::now();
         loop {
+            if let Some(message) = self.take_deferred_response(id) {
+                return parse_rpc_response(method, message);
+            }
             let remaining = match timeout.checked_sub(started_at.elapsed()) {
                 Some(remaining) => remaining,
                 None => {
@@ -667,30 +762,33 @@ impl AppServerClient {
                 }
             };
 
-            if message.get("id").and_then(Value::as_u64) != Some(id) {
+            if message.get("id").and_then(Value::as_u64) != Some(id)
+                || message.get("method").is_some()
+            {
+                self.defer_message(message);
                 continue;
             }
-
-            if let Some(error) = message.get("error") {
-                let detail = error
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .map(ToOwned::to_owned)
-                    .unwrap_or_else(|| error.to_string());
-                return Err(CodexError::Rpc {
-                    method: method.to_string(),
-                    message: detail,
-                });
-            }
-
-            return message
-                .get("result")
-                .cloned()
-                .ok_or_else(|| CodexError::InvalidResponse {
-                    method: method.to_string(),
-                    message: "缺少 result 字段".to_string(),
-                });
+            return parse_rpc_response(method, message);
         }
+    }
+
+    fn take_deferred_response(&mut self, id: u64) -> Option<Value> {
+        let position = self.deferred_messages.iter().position(|message| {
+            message.get("method").is_none() && message.get("id").and_then(Value::as_u64) == Some(id)
+        })?;
+        self.deferred_messages.remove(position)
+    }
+
+    fn defer_message(&mut self, message: Value) {
+        if self.deferred_messages.len() >= MAX_DEFERRED_MESSAGES {
+            let removable = self
+                .deferred_messages
+                .iter()
+                .position(|candidate| candidate.get("id").is_none())
+                .unwrap_or(0);
+            self.deferred_messages.remove(removable);
+        }
+        self.deferred_messages.push_back(message);
     }
 
     fn notify(&mut self, method: &str, params: Value) -> Result<(), CodexError> {
@@ -702,19 +800,26 @@ impl AppServerClient {
     }
 
     fn write_message(&mut self, method: &str, payload: &Value) -> Result<(), CodexError> {
-        let correlation_id = payload
-            .get("id")
-            .and_then(Value::as_u64)
-            .map(|id| id.to_string());
+        let kind = if payload.get("id").is_some() {
+            "request"
+        } else {
+            "notification"
+        };
+        self.write_protocol_message(method, kind, payload)
+    }
+
+    fn write_protocol_message(
+        &mut self,
+        method: &str,
+        kind: &str,
+        payload: &Value,
+    ) -> Result<(), CodexError> {
+        let correlation_id = payload.get("id").map(Value::to_string);
         record_json(
             ProtocolRecord {
                 channel: "app_server",
                 direction: "xray_to_server",
-                kind: if correlation_id.is_some() {
-                    "request"
-                } else {
-                    "notification"
-                },
+                kind,
                 method: Some(method),
                 correlation_id: correlation_id.as_deref(),
                 status: None,
@@ -736,6 +841,39 @@ impl AppServerClient {
             .map(|tail| tail.trim().to_string())
             .unwrap_or_else(|_| "无法读取 stderr".to_string())
     }
+}
+
+fn response_nested_id(method: &str, value: &Value, object: &str) -> Result<String, CodexError> {
+    value
+        .get(object)
+        .and_then(|value| value.get("id"))
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| CodexError::InvalidResponse {
+            method: method.to_string(),
+            message: format!("缺少 {object}.id 字段"),
+        })
+}
+
+fn parse_rpc_response(method: &str, message: Value) -> Result<Value, CodexError> {
+    if let Some(error) = message.get("error") {
+        let detail = error
+            .get("message")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| error.to_string());
+        return Err(CodexError::Rpc {
+            method: method.to_string(),
+            message: detail,
+        });
+    }
+    message
+        .get("result")
+        .cloned()
+        .ok_or_else(|| CodexError::InvalidResponse {
+            method: method.to_string(),
+            message: "缺少 result 字段".to_string(),
+        })
 }
 
 fn normalize_thread_status(value: &Value) -> Option<String> {
@@ -1035,6 +1173,32 @@ fn parse_account(value: Value) -> Result<Option<AccountInfo>, CodexError> {
     }))
 }
 
+fn remote_thread_start_params(cwd: &Path) -> Value {
+    json!({
+        "cwd": cwd,
+        "approvalPolicy": "on-request",
+        "sandbox": "workspace-write"
+    })
+}
+
+fn remote_thread_resume_params(thread_id: &str) -> Value {
+    json!({
+        "threadId": thread_id,
+        "approvalPolicy": "on-request",
+        "sandbox": "workspace-write"
+    })
+}
+
+fn thread_list_params(cursor: Option<&str>) -> Value {
+    json!({
+        "cursor": cursor,
+        "limit": THREAD_PAGE_LIMIT,
+        "sortKey": "updated_at",
+        "sortDirection": "desc",
+        "useStateDbOnly": false
+    })
+}
+
 fn parse_rate_limits(value: Value) -> Result<(Option<String>, Vec<RateLimit>), CodexError> {
     let response: RawRateLimitResponse =
         serde_json::from_value(value).map_err(|error| CodexError::InvalidResponse {
@@ -1218,6 +1382,37 @@ mod tests {
             .expect("account exists");
         assert_eq!(account.account_type, "chatgpt");
         assert_eq!(account.plan_type.as_deref(), Some("business"));
+    }
+
+    #[test]
+    fn remote_thread_requests_stay_on_the_stable_app_server_api() {
+        let start = remote_thread_start_params(Path::new("/tmp/project"));
+        assert_eq!(
+            start.get("cwd").and_then(Value::as_str),
+            Some("/tmp/project")
+        );
+        assert!(start.get("experimentalRawEvents").is_none());
+
+        let resume = remote_thread_resume_params("thread-123");
+        assert_eq!(
+            resume.get("threadId").and_then(Value::as_str),
+            Some("thread-123")
+        );
+        assert!(resume.get("excludeTurns").is_none());
+        assert_eq!(
+            resume.get("approvalPolicy").and_then(Value::as_str),
+            Some("on-request")
+        );
+        assert_eq!(
+            resume.get("sandbox").and_then(Value::as_str),
+            Some("workspace-write")
+        );
+
+        let list = thread_list_params(None);
+        assert_eq!(
+            list.get("useStateDbOnly").and_then(Value::as_bool),
+            Some(false)
+        );
     }
 
     #[test]

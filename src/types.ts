@@ -362,6 +362,53 @@ export type ChatBridgeStatus = {
   last_error: string | null;
 };
 
+export type RemoteApprovalSnapshot = {
+  kind: string;
+  summary: string;
+  requested_at: string;
+};
+
+export type RemoteChannelSnapshot = {
+  enabled: boolean;
+  state:
+    | "login_required"
+    | "connected"
+    | "stopped"
+    | "degraded"
+    | string;
+  account_id: string | null;
+  owner_user_id: string | null;
+  qr_svg: string | null;
+  verify_code_required: boolean;
+  attached_thread_id: string | null;
+  attached_thread_title: string | null;
+  attached_cwd: string | null;
+  control_ready: boolean;
+  control_backend: "desktop_ipc" | "xray_app_server" | "none" | string;
+  active_turn_id: string | null;
+  latest_activity: string | null;
+  agent_preview: string | null;
+  pending_approval: RemoteApprovalSnapshot | null;
+  last_inbound_at: string | null;
+  last_outbound_at: string | null;
+  last_error: string | null;
+};
+
+export type RemoteTaskSummary = {
+  id: string;
+  title: string;
+  cwd: string;
+  status:
+    | "idle"
+    | "running"
+    | "waiting_approval"
+    | "waiting_input"
+    | "failed"
+    | string;
+  updated_at: number;
+  control_mode: "available" | "observe" | string;
+};
+
 export type CodexSettings = {
   model_reasoning_effort: string | null;
   plan_mode_reasoning_effort: string | null;

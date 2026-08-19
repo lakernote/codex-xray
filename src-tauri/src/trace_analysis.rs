@@ -18,7 +18,7 @@ use crate::storage::{
     TraceMirrorUsageEvent, read_index_entries, write_index_entries, write_trace_mirror,
 };
 
-const TRACE_INDEX_SCHEMA_VERSION: u32 = 14;
+const TRACE_INDEX_SCHEMA_VERSION: u32 = 15;
 const TRACE_INDEX_NAMESPACE: &str = "trace-files";
 const MAX_TRACE_FILES: usize = 240;
 const MAX_PARSED_LINE_BYTES: usize = 512 * 1024;
@@ -1235,6 +1235,7 @@ pub fn get_trace_session_detail_cached(
     if cache.index.is_none() {
         cache.index = load_detail_index(index_path)?;
     }
+    hydrate_trace_detail_from_source(session_id, cache)?;
     let Some(index) = cache.index.as_ref() else {
         return Ok(None);
     };
@@ -1257,6 +1258,39 @@ pub fn get_trace_session_detail_cached(
         replayed_prefix,
         SystemTime::now(),
     )))
+}
+
+fn hydrate_trace_detail_from_source(
+    session_id: &str,
+    cache: &mut TraceIndexCache,
+) -> Result<(), String> {
+    let Some(index) = cache.index.as_mut() else {
+        return Ok(());
+    };
+    let candidate = index.files.iter().find_map(|(path, record)| {
+        (record.session_id.as_deref() == Some(session_id)
+            && record.turns.values().any(|turn| {
+                turn.phase_events
+                    .iter()
+                    .any(|event| event.content_bytes > 0 && event.content.is_none())
+            }))
+        .then(|| path.clone())
+    });
+    let Some(path) = candidate.map(PathBuf::from) else {
+        return Ok(());
+    };
+    if !trace_path_matches_session(&path, session_id) {
+        return Ok(());
+    }
+    let metadata =
+        fs::metadata(&path).map_err(|error| format!("无法读取 {}：{error}", path.display()))?;
+    let record = parse_trace_file(&path, metadata.len(), modified_millis(&metadata))?;
+    if record.session_id.as_deref() == Some(session_id) {
+        index
+            .files
+            .insert(path.to_string_lossy().to_string(), record);
+    }
+    Ok(())
 }
 
 pub fn analyze_trace_session_cached(
@@ -3006,9 +3040,9 @@ fn parse_trace_file(
                 subject: presentation.subject,
                 detail: presentation.detail,
                 arguments: presentation.arguments,
-                arguments_json: trace_detail_json(&input),
+                arguments_json: trace_argument_detail_json(&input),
                 result_fields: extract_result_fields(result),
-                result_json: trace_detail_json(result),
+                result_json: None,
                 signature,
                 repeated: previous_calls > 0,
                 failed,
@@ -3243,7 +3277,7 @@ fn parse_trace_file(
                 .cloned()
                 .unwrap_or(Value::Null);
             let presentation = describe_tool_call(&tool_name, namespace, &input);
-            let arguments_json = trace_detail_json(&input);
+            let arguments_json = trace_argument_detail_json(&input);
             let signature = call_signature(&tool_name, &input);
             let previous_calls = *call_counts.get(&signature).unwrap_or(&0);
             *call_counts.entry(signature.clone()).or_default() += 1;
@@ -3307,7 +3341,7 @@ fn parse_trace_file(
             let output = payload.get("output").unwrap_or(payload);
             let exit_code = extract_exit_code(output);
             let mut result_fields = extract_result_fields(output);
-            let result_json = trace_detail_json(output);
+            let result_json = None;
             if let Some(exit_code) = exit_code
                 && !result_fields.iter().any(|field| field.key == "exit_code")
             {
@@ -3489,12 +3523,12 @@ fn describe_tool_call(tool_name: &str, namespace: Option<&str>, input: &Value) -
     } else {
         for key in ["cmd", "code", "query", "q", "url", "jql_str", "title"] {
             if let Some(value) = parsed.get(key).and_then(Value::as_str) {
-                detail = Some(preview_text(value, 640));
+                detail = Some(sanitize_text(value, 640));
                 break;
             }
         }
         if detail.is_none() && (normalized == "exec" || normalized.ends_with(".exec")) {
-            detail = Some(preview_text(&raw, 640));
+            detail = Some(sanitize_text(&raw, 640));
         }
     }
 
@@ -3539,17 +3573,102 @@ fn serialized_value_bytes(value: &Value) -> u64 {
     }
 }
 
-fn trace_detail_json(value: &Value) -> Option<String> {
+fn trace_argument_detail_json(value: &Value) -> Option<String> {
     let parsed = parse_tool_input(value);
     if parsed.is_null() {
         return None;
     }
-    let rendered = if let Value::String(text) = &parsed {
-        text.clone()
-    } else {
-        serde_json::to_string_pretty(&parsed).ok()?
-    };
+    let sanitized = sanitize_trace_argument_value("", &parsed, 0);
+    let rendered = serde_json::to_string_pretty(&sanitized).ok()?;
     Some(truncate_text(&rendered, MAX_TRACE_DETAIL_CHARS))
+}
+
+fn sanitize_trace_argument_value(key: &str, value: &Value, depth: usize) -> Value {
+    if is_sensitive_trace_key(key) {
+        return Value::String("[redacted]".to_string());
+    }
+    if depth >= 6 {
+        return Value::String("[truncated]".to_string());
+    }
+    if key.eq_ignore_ascii_case("patch") {
+        return value
+            .as_str()
+            .map(extract_patch_files)
+            .filter(|files| !files.is_empty())
+            .map(|files| Value::String(format!("[patch omitted: {}]", files.join(", "))))
+            .unwrap_or_else(|| Value::String("[patch omitted]".to_string()));
+    }
+    match value {
+        Value::Null | Value::Bool(_) | Value::Number(_) => value.clone(),
+        Value::String(text) => {
+            let trimmed = text.trim();
+            if trimmed.contains("*** Begin Patch") {
+                let files = extract_patch_files(trimmed);
+                return if files.is_empty() {
+                    Value::String("[patch omitted]".to_string())
+                } else {
+                    Value::String(format!("[patch omitted: {}]", files.join(", ")))
+                };
+            }
+            if (trimmed.starts_with('{') || trimmed.starts_with('['))
+                && let Ok(parsed) = serde_json::from_str::<Value>(trimmed)
+            {
+                return sanitize_trace_argument_value(key, &parsed, depth + 1);
+            }
+            Value::String(sanitize_text(text, 2_000))
+        }
+        Value::Array(values) => Value::Array(
+            values
+                .iter()
+                .take(20)
+                .map(|value| sanitize_trace_argument_value("", value, depth + 1))
+                .collect(),
+        ),
+        Value::Object(values) => Value::Object(
+            values
+                .iter()
+                .take(20)
+                .map(|(key, value)| {
+                    (
+                        key.clone(),
+                        sanitize_trace_argument_value(key, value, depth + 1),
+                    )
+                })
+                .collect(),
+        ),
+    }
+}
+
+fn is_sensitive_trace_key(key: &str) -> bool {
+    let normalized = key.to_ascii_lowercase().replace('-', "_");
+    matches!(
+        normalized.as_str(),
+        "token"
+            | "access_token"
+            | "refresh_token"
+            | "id_token"
+            | "bearer_token"
+            | "secret"
+            | "client_secret"
+            | "password"
+            | "passwd"
+            | "authorization"
+            | "credential"
+            | "credentials"
+            | "cookie"
+            | "set_cookie"
+            | "api_key"
+            | "apikey"
+            | "private_key"
+            | "access_key"
+            | "access_key_id"
+            | "secret_access_key"
+    ) || normalized.ends_with("_api_key")
+        || normalized.ends_with("_access_token")
+        || normalized.ends_with("_refresh_token")
+        || normalized.ends_with("_client_secret")
+        || normalized.ends_with("_private_key")
+        || normalized.ends_with("_password")
 }
 
 fn extract_content_text(value: &Value) -> Option<String> {
@@ -3722,6 +3841,9 @@ fn summarize_arguments(input: &Value) -> Vec<TraceEventField> {
 }
 
 fn summarize_argument_value(key: &str, value: &Value) -> String {
+    if is_sensitive_trace_key(key) {
+        return "[redacted]".to_string();
+    }
     match value {
         Value::Null => "null".to_string(),
         Value::Bool(value) => value.to_string(),
@@ -3733,57 +3855,59 @@ fn summarize_argument_value(key: &str, value: &Value) -> String {
                     return files.join(", ");
                 }
             }
-            preview_text(value, 240)
+            sanitize_text(value, 240)
         }
         Value::Array(values) => format!("[{} items]", values.len()),
         Value::Object(values) => format!("{{{} fields}}", values.len()),
     }
 }
 
-fn preview_text(value: &str, limit: usize) -> String {
-    truncate_text(
-        &value.split_whitespace().collect::<Vec<_>>().join(" "),
-        limit,
-    )
-}
-
-fn sanitize_text(value: &str, limit: usize) -> String {
+pub(crate) fn sanitize_text(value: &str, limit: usize) -> String {
     let collapsed = value.split_whitespace().collect::<Vec<_>>().join(" ");
-    let mut sanitized = collapsed
-        .split(' ')
-        .map(redact_token)
-        .collect::<Vec<_>>()
-        .join(" ");
-    if sanitized.to_ascii_lowercase().contains("bearer ") {
-        let words = sanitized.split_whitespace().collect::<Vec<_>>();
-        let mut output = Vec::with_capacity(words.len());
-        let mut redact_next = false;
-        for word in words {
-            if redact_next {
+    let words = collapsed.split(' ').collect::<Vec<_>>();
+    let mut output = Vec::with_capacity(words.len());
+    let mut redact_next = false;
+    for word in words {
+        if redact_next {
+            let normalized = normalized_sensitive_token(word);
+            if normalized == "bearer" {
+                output.push(word);
+            } else {
                 output.push("[redacted]");
                 redact_next = false;
-            } else {
-                redact_next = word.eq_ignore_ascii_case("bearer");
-                output.push(word);
             }
+            continue;
         }
-        sanitized = output.join(" ");
+        let normalized = normalized_sensitive_token(word);
+        let redacted = redact_token(word);
+        redact_next = redacted != "[redacted]"
+            && (normalized == "bearer"
+                || normalized.contains("authorization:bearer")
+                || normalized.ends_with("authorization:")
+                || matches!(
+                    normalized.as_str(),
+                    "--token"
+                        | "--api-key"
+                        | "--apikey"
+                        | "--password"
+                        | "--passwd"
+                        | "--secret"
+                        | "--authorization"
+                        | "--cookie"
+                ));
+        output.push(redacted);
     }
-    truncate_text(&sanitized, limit)
+    truncate_text(&output.join(" "), limit)
 }
 
 fn redact_token(token: &str) -> &str {
-    let normalized = token
-        .trim_matches(|character: char| {
-            matches!(
-                character,
-                '"' | '\'' | '`' | ',' | ';' | '{' | '}' | '(' | ')'
-            )
-        })
-        .to_ascii_lowercase();
+    let normalized = normalized_sensitive_token(token);
+    let assignment = normalized.trim_start_matches('-');
     if normalized.starts_with("sk-")
         || [
             "token=",
+            "access_token=",
+            "refresh_token=",
             "secret=",
             "password=",
             "passwd=",
@@ -3793,12 +3917,27 @@ fn redact_token(token: &str) -> &str {
             "cookie=",
         ]
         .iter()
-        .any(|needle| normalized.starts_with(needle))
+        .any(|needle| {
+            assignment.starts_with(needle)
+                || normalized.contains(&format!("?{needle}"))
+                || normalized.contains(&format!("&{needle}"))
+        })
     {
         "[redacted]"
     } else {
         token
     }
+}
+
+fn normalized_sensitive_token(token: &str) -> String {
+    token
+        .trim_matches(|character: char| {
+            matches!(
+                character,
+                '"' | '\'' | '`' | ',' | ';' | '{' | '}' | '(' | ')'
+            )
+        })
+        .to_ascii_lowercase()
 }
 
 fn truncate_text(value: &str, limit: usize) -> String {
@@ -4154,7 +4293,8 @@ fn load_index(path: &Path, warnings: &mut Vec<String>) -> TraceIndex {
 }
 
 fn write_index(path: &Path, index: &TraceIndex) -> Result<(), String> {
-    let entries = index
+    let safe_index = persistence_safe_trace_index(index);
+    let entries = safe_index
         .files
         .iter()
         .map(|(session_path, indexed)| {
@@ -4169,7 +4309,22 @@ fn write_index(path: &Path, index: &TraceIndex) -> Result<(), String> {
         TRACE_INDEX_SCHEMA_VERSION,
         &entries,
     )?;
-    write_trace_mirror(path, &trace_mirror_sessions(index))
+    write_trace_mirror(path, &trace_mirror_sessions(&safe_index))
+}
+
+fn persistence_safe_trace_index(index: &TraceIndex) -> TraceIndex {
+    let mut safe = index.clone();
+    for record in safe.files.values_mut() {
+        for turn in record.turns.values_mut() {
+            for phase in &mut turn.phase_events {
+                phase.content = None;
+            }
+            for event in &mut turn.tool_events {
+                event.result_json = None;
+            }
+        }
+    }
+    safe
 }
 
 fn trace_mirror_sessions(index: &TraceIndex) -> Vec<TraceMirrorSession> {
@@ -4401,7 +4556,7 @@ mod tests {
     }
 
     #[test]
-    fn describes_cli_with_exact_command_preview() {
+    fn describes_cli_without_exposing_command_credentials() {
         let input = Value::String(
             r#"{"cmd":"curl -H 'Authorization: Bearer abc123' https://example.com token=private","workdir":"/tmp/codex-xray"}"#
                 .to_string(),
@@ -4410,12 +4565,25 @@ mod tests {
         assert_eq!(presentation.category, "cli");
         let detail = presentation.detail.expect("command detail");
         assert!(detail.contains("curl"));
-        assert!(detail.contains("abc123"));
-        assert!(detail.contains("private"));
+        assert!(!detail.contains("abc123"));
+        assert!(!detail.contains("private"));
+        assert!(detail.contains("[redacted]"));
     }
 
     #[test]
-    fn classifies_mcp_server_and_keeps_argument_values() {
+    fn sanitizes_split_secret_arguments() {
+        let value = sanitize_text(
+            "curl --api-key top-secret --token=inline-secret -H 'Authorization: Bearer another-secret'",
+            300,
+        );
+        assert!(!value.contains("top-secret"));
+        assert!(!value.contains("inline-secret"));
+        assert!(!value.contains("another-secret"));
+        assert!(value.matches("[redacted]").count() >= 2);
+    }
+
+    #[test]
+    fn classifies_mcp_server_and_redacts_sensitive_argument_values() {
         let input = Value::String(
             r#"{"issue_key":"SPARK-123","api_key":"private","max_results":20,"max_output_tokens":10000}"#
                 .to_string(),
@@ -4431,7 +4599,7 @@ mod tests {
             presentation
                 .arguments
                 .iter()
-                .any(|field| { field.key == "api_key" && field.value == "private" })
+                .any(|field| { field.key == "api_key" && field.value == "[redacted]" })
         );
         assert!(
             presentation
@@ -4480,15 +4648,16 @@ mod tests {
     }
 
     #[test]
-    fn builds_full_argument_and_result_details() {
+    fn builds_sanitized_argument_and_result_details() {
         let input = Value::String(
             r#"{"query":{"filters":[{"field":"status","value":"open"}]},"auth":{"api_key":"private-key"},"limit":25}"#
                 .to_string(),
         );
-        let tree = trace_detail_json(&input).expect("argument tree");
+        let tree = trace_argument_detail_json(&input).expect("argument tree");
         assert!(tree.contains("\"filters\""));
         assert!(tree.contains("\"status\""));
-        assert!(tree.contains("private-key"));
+        assert!(!tree.contains("private-key"));
+        assert!(tree.contains("[redacted]"));
 
         let result = Value::String(
             r#"{"exit_code":0,"wall_time_seconds":0.25,"status":"ok","output":"private tool output"}"#
@@ -4510,23 +4679,18 @@ mod tests {
                 .expect("serialize fields")
                 .contains("private tool output")
         );
-        assert!(
-            trace_detail_json(&result)
-                .expect("result detail")
-                .contains("private tool output")
-        );
     }
 
     #[test]
-    fn keeps_patch_body_in_local_trace_detail() {
+    fn omits_patch_body_from_local_trace_detail() {
         let input = Value::String(
             "*** Begin Patch\n*** Update File: src/App.tsx\n@@\n-secret source\n+new source\n*** End Patch\n"
                 .to_string(),
         );
-        let tree = trace_detail_json(&input).expect("argument tree");
+        let tree = trace_argument_detail_json(&input).expect("argument tree");
         assert!(tree.contains("src/App.tsx"));
-        assert!(tree.contains("secret source"));
-        assert!(tree.contains("new source"));
+        assert!(!tree.contains("secret source"));
+        assert!(!tree.contains("new source"));
     }
 
     #[test]
@@ -4666,10 +4830,9 @@ mod tests {
                 && event.source_order == 9
                 && event.source_end_order.is_none()
                 && event.source_type.as_deref() == Some("response_item.function_call")
-                && event
-                    .arguments_json
-                    .as_deref()
-                    .is_some_and(|value| value.contains("private-key"))
+                && event.arguments_json.as_deref().is_some_and(|value| {
+                    value.contains("[redacted]") && !value.contains("private-key")
+                })
         }));
         assert!(detail.turns[0].timeline.iter().any(|event| {
             event.kind == "tool_result"
@@ -4678,10 +4841,7 @@ mod tests {
                 && event.call_id.as_deref() == Some("call-1")
                 && event.source_order == 10
                 && event.source_type.as_deref() == Some("response_item.function_call_output")
-                && event
-                    .result_json
-                    .as_deref()
-                    .is_some_and(|value| value.contains("private tool result"))
+                && event.result_json.is_none()
                 && event
                     .result_fields
                     .iter()
@@ -4690,8 +4850,19 @@ mod tests {
         let serialized = serde_json::to_string(&indexed).expect("serialize");
         assert!(serialized.contains("private assistant message"));
         assert!(serialized.contains("private reasoning summary"));
-        assert!(serialized.contains("private tool result"));
-        assert!(serialized.contains("private-key"));
+        assert!(!serialized.contains("private tool result"));
+        assert!(!serialized.contains("private-key"));
+
+        let safe = persistence_safe_trace_index(&TraceIndex {
+            schema_version: TRACE_INDEX_SCHEMA_VERSION,
+            files: BTreeMap::from([(path.to_string_lossy().to_string(), indexed)]),
+        });
+        let persisted = serde_json::to_string(&safe).expect("serialize safe index");
+        assert!(!persisted.contains("private user prompt"));
+        assert!(!persisted.contains("private assistant message"));
+        assert!(!persisted.contains("private reasoning summary"));
+        assert!(!persisted.contains("private tool result"));
+        assert!(!persisted.contains("private-key"));
 
         fs::remove_dir_all(directory).expect("cleanup");
     }
@@ -4992,11 +5163,12 @@ mod tests {
         assert_eq!(stages[0].server.as_deref(), Some("aiops-pilot"));
         assert_eq!(stages[0].label, "query_logs");
         assert_eq!(stages[1].duration_ms, Some(2_500));
+        assert!(stages[2].result_json.is_none());
         assert!(
             stages[2]
-                .result_json
-                .as_deref()
-                .is_some_and(|value| value.contains("two matching log lines"))
+                .result_fields
+                .iter()
+                .any(|field| field.key == "result_type")
         );
 
         fs::remove_dir_all(directory).expect("cleanup");
