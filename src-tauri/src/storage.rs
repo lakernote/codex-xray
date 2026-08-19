@@ -6,7 +6,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-const DATABASE_SCHEMA_VERSION: u32 = 4;
+const DATABASE_SCHEMA_VERSION: u32 = 5;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct StorageHealth {
@@ -405,6 +405,17 @@ fn open(path: &Path) -> Result<Connection, String> {
             ",
         )
         .map_err(|error| format!("无法初始化分析数据库：{error}"))?;
+    if previous_schema < 5 {
+        connection
+            .execute_batch(
+                "
+                DELETE FROM index_entries WHERE namespace = 'trace-files';
+                DELETE FROM index_meta WHERE namespace = 'trace-files';
+                DELETE FROM trace_sessions;
+                ",
+            )
+            .map_err(|error| format!("无法清理旧执行追踪敏感缓存：{error}"))?;
+    }
     if previous_schema < 2 {
         connection
             .execute_batch(

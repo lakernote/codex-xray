@@ -15,10 +15,12 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 async-stream = "0.3"
 axum = "0.8.8"
+base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 eventsource-stream = "0.2.3"
 futures-util = "0.3"
 memchr = "2"
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "stream", "rustls"] }
 rusqlite = { version = "0.40.1", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
@@ -27,5 +29,5 @@ tauri = { version = "2", features = [] }
 tauri-plugin-process = "2"
 tauri-plugin-updater = "2"
 thiserror = "2"
-tokio = { version = "1", features = ["net", "sync"] }
+tokio = { version = "1", features = ["net", "sync", "time"] }
 url = "2"

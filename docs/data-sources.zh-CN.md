@@ -42,7 +42,7 @@ Codex 当前的自定义 Provider 使用 `wire_api = "responses"`。界面里的
 
 当前安装的 Codex 对自定义 Provider 接受 `wire_api = "responses"`。选择 Chat 预设时，X-Ray 会把本机 Responses 地址写入 Codex 配置，并把真实厂商 URL 保存在不含密钥的桥接注册表中。Codex 还会向该地址请求模型目录；X-Ray 返回所选模型 ID 与上下文窗口，使 Codex 能按正确窗口安排压缩。
 
-兼容桥转换消息文本、流式输出、函数定义、工具请求、工具结果和用量计数。Chat Completions 无法表达的 Responses 专属能力会被明确舍弃，包括原生 Web Search、加密 Reasoning 和服务端压缩。关闭主窗口后 X-Ray 会留在系统托盘；真正退出 X-Ray 会停止兼容桥。
+兼容桥转换消息文本、流式输出、函数定义、工具请求、工具结果和用量计数。Chat Completions 无法表达的 Responses 专属能力会被明确舍弃，包括原生 Web Search、加密 Reasoning 和服务端压缩。关闭主窗口会退出 X-Ray，同时停止兼容桥。
 
 ### 让 Codex 桌面端看到环境变量
 
@@ -206,9 +206,10 @@ Codex X-Ray：
 - 只保存限长、脱敏的工具参数、命令和脚本摘要，用于用户主动打开的执行 Timeline；
 - 不修改 session 或 Codex 数据库；
 - 仅在用户于控制台完成差异预览并二次确认时，通过官方 `config/batchWrite` 更新用户选择的配置键；
-- 不读取或保存 Provider API Key，只记录用户指定的环境变量名；
+- 把用户直接填写的 Provider API Key 保存到 `~/.codex/codex-xray/credentials/` 下的用户专属文件，或临时读取所选环境变量；Key 不写入配置、SQLite、日志、WebView 或进程参数；
 - 只把用户主动设置的模型单价写入自己的 `pricing-config.json`，不修改 Codex 计费或账号数据；
-- 不代理或拦截 Codex 请求；
+- 原生 Responses 流量由 Codex 直接发送给 Provider；只有用户明确选择的 Chat Provider 会经过 X-Ray 本机桥转换；
+- 只有本人启用远程通道后，提示词、回复、进度和审批摘要才会经过微信；X-Ray 生成的微信系统消息会缩短本机路径并脱敏常见凭据形式；
 - 不上传本地分析数据；
 - 自己的缓存和索引只写入 Codex X-Ray 应用数据目录。
 

@@ -1,11 +1,13 @@
 mod chat_bridge;
 mod codex;
 mod cost_estimate;
+mod desktop_ipc;
 mod environment;
 mod local_usage;
 mod pricing;
 mod protocol_capture;
 mod provider;
+mod remote_channel;
 mod settings;
 mod storage;
 mod trace_analysis;
@@ -34,6 +36,7 @@ use provider::{
     read_restore_point, restore_edits, restore_point, rollback_credential, rollback_profile,
     save_restore_point,
 };
+use remote_channel::{RemoteChannelSnapshot, RemoteChannelState, RemoteTaskSummary};
 use settings::{
     SettingsApplyRequest, SettingsSnapshot, build_settings_edits, build_settings_snapshot,
     read_restore_point as read_settings_restore_point, restore_edits as restore_settings_edits,
@@ -884,6 +887,73 @@ fn get_chat_bridge_status(bridge: tauri::State<'_, ChatBridgeState>) -> ChatBrid
 }
 
 #[tauri::command]
+fn get_remote_channel_snapshot(
+    channel: tauri::State<'_, RemoteChannelState>,
+) -> RemoteChannelSnapshot {
+    channel.snapshot()
+}
+
+#[tauri::command]
+async fn start_weixin_login(
+    channel: tauri::State<'_, RemoteChannelState>,
+) -> Result<RemoteChannelSnapshot, String> {
+    channel.start_login().await
+}
+
+#[tauri::command]
+async fn poll_weixin_login(
+    verify_code: Option<String>,
+    channel: tauri::State<'_, RemoteChannelState>,
+) -> Result<RemoteChannelSnapshot, String> {
+    channel.poll_login(verify_code).await
+}
+
+#[tauri::command]
+fn set_remote_channel_enabled(
+    enabled: bool,
+    channel: tauri::State<'_, RemoteChannelState>,
+) -> Result<RemoteChannelSnapshot, String> {
+    channel.set_enabled(enabled)
+}
+
+#[tauri::command]
+fn disconnect_weixin_channel(
+    channel: tauri::State<'_, RemoteChannelState>,
+) -> Result<RemoteChannelSnapshot, String> {
+    channel.disconnect()
+}
+
+#[tauri::command]
+async fn get_remote_tasks(
+    channel: tauri::State<'_, RemoteChannelState>,
+) -> Result<Vec<RemoteTaskSummary>, String> {
+    channel.tasks().await
+}
+
+#[tauri::command]
+async fn attach_remote_task(
+    thread_id: String,
+    channel: tauri::State<'_, RemoteChannelState>,
+) -> Result<RemoteChannelSnapshot, String> {
+    channel.attach_thread(&thread_id).await
+}
+
+#[tauri::command]
+async fn create_remote_task(
+    cwd: String,
+    channel: tauri::State<'_, RemoteChannelState>,
+) -> Result<RemoteChannelSnapshot, String> {
+    channel.create_thread(&cwd).await
+}
+
+#[tauri::command]
+async fn interrupt_remote_task(
+    channel: tauri::State<'_, RemoteChannelState>,
+) -> Result<RemoteChannelSnapshot, String> {
+    channel.interrupt_active_turn().await
+}
+
+#[tauri::command]
 async fn get_codex_settings(
     state: tauri::State<'_, UsageState>,
 ) -> Result<SettingsSnapshot, String> {
@@ -1016,10 +1086,18 @@ pub fn run() {
             let chat_bridge =
                 ChatBridgeState::load(app_data_dir.join("chat-bridge-providers.json"))?;
 
+            let codex_client = Arc::new(Mutex::new(None));
+            let codex_state_dir = app_data_dir.join("codex-state");
+            let remote_channel = RemoteChannelState::load(
+                &app_data_dir,
+                Arc::clone(&codex_client),
+                codex_state_dir.clone(),
+            )?;
+
             app.manage(UsageState {
-                client: Arc::new(Mutex::new(None)),
+                client: codex_client,
                 app_data_dir: app_data_dir.clone(),
-                codex_state_dir: app_data_dir.join("codex-state"),
+                codex_state_dir,
                 database_path,
                 pricing_config_path,
                 cost_scan: Arc::new(Mutex::new(())),
@@ -1029,7 +1107,9 @@ pub fn run() {
                 settings_restore_path: app_data_dir.join("settings-restore.json"),
             });
             app.manage(chat_bridge.clone());
+            app.manage(remote_channel.clone());
             tauri::async_runtime::spawn(chat_bridge::serve(chat_bridge));
+            remote_channel.start_if_enabled();
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -1061,6 +1141,15 @@ pub fn run() {
             get_extension_usage,
             get_provider_config,
             get_chat_bridge_status,
+            get_remote_channel_snapshot,
+            start_weixin_login,
+            poll_weixin_login,
+            set_remote_channel_enabled,
+            disconnect_weixin_channel,
+            get_remote_tasks,
+            attach_remote_task,
+            create_remote_task,
+            interrupt_remote_task,
             test_provider_connection,
             save_provider_profile,
             apply_provider_config,
