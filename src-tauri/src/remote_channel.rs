@@ -50,6 +50,7 @@ pub struct RemoteChannelSnapshot {
     pub attached_thread_id: Option<String>,
     pub attached_thread_title: Option<String>,
     pub attached_cwd: Option<String>,
+    pub control_status: RemoteControlStatus,
     pub control_ready: bool,
     pub control_backend: String,
     pub active_turn_id: Option<String>,
@@ -59,6 +60,16 @@ pub struct RemoteChannelSnapshot {
     pub last_inbound_at: Option<String>,
     pub last_outbound_at: Option<String>,
     pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteControlStatus {
+    Unselected,
+    Saved,
+    Connecting,
+    Ready,
+    Unavailable,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -190,6 +201,7 @@ struct RemoteChannelRuntime {
     attached_thread_id: Option<String>,
     attached_thread_title: Option<String>,
     attached_cwd: Option<String>,
+    control_status: RemoteControlStatus,
     control_ready: bool,
     control_backend: String,
     desktop_owner_client_id: Option<String>,
@@ -233,6 +245,11 @@ impl RemoteChannelState {
         let config = read_config(&config_path)?;
         let token = read_secret(&token_path).ok();
         let pending_turn_id = config.pending_turn_id.clone();
+        let control_status = if config.attached_thread_id.is_some() {
+            RemoteControlStatus::Saved
+        } else {
+            RemoteControlStatus::Unselected
+        };
         let state = if config.enabled && token.is_some() {
             "connected"
         } else if token.is_some() {
@@ -259,8 +276,9 @@ impl RemoteChannelState {
                 attached_thread_id: config.attached_thread_id,
                 attached_thread_title: config.attached_thread_title,
                 attached_cwd: config.attached_cwd,
-                // A previous App Server process cannot be treated as still attached after X-Ray
-                // restarts. The first remote instruction will safely resume an idle thread.
+                // A saved target is selection state, not proof that a previous control
+                // transport survived the X-Ray restart.
+                control_status,
                 control_ready: false,
                 control_backend: "none".to_string(),
                 desktop_owner_client_id: None,
@@ -305,6 +323,7 @@ impl RemoteChannelState {
             attached_thread_id: runtime.attached_thread_id.clone(),
             attached_thread_title: runtime.attached_thread_title.clone(),
             attached_cwd: runtime.attached_cwd.clone(),
+            control_status: runtime.control_status,
             control_ready: runtime.control_ready,
             control_backend: runtime.control_backend.clone(),
             active_turn_id: runtime.active_turn_id.clone(),
@@ -338,16 +357,12 @@ impl RemoteChannelState {
                 && let Err(error) = state.restore_saved_attachment(thread_id).await
                 && let Ok(mut runtime) = state.runtime.write()
             {
+                runtime.control_status = RemoteControlStatus::Unavailable;
                 runtime.control_ready = false;
                 runtime.control_backend = "none".to_string();
                 runtime.desktop_owner_client_id = None;
-                if is_occupied_error(&error) {
-                    runtime.latest_activity = Some(occupied_activity());
-                    runtime.last_error = None;
-                } else {
-                    runtime.latest_activity = Some("恢复控制目标失败".to_string());
-                    runtime.last_error = Some(error);
-                }
+                runtime.latest_activity = Some("恢复已保存的控制目标失败".to_string());
+                runtime.last_error = Some(error);
             }
             if enabled {
                 state.resume_pending_monitor();
@@ -386,7 +401,65 @@ impl RemoteChannelState {
     }
 
     async fn restore_saved_attachment(&self, thread_id: String) -> Result<(), String> {
-        self.attach_thread(&thread_id).await.map(|_| ())
+        match self.probe_desktop_control(&thread_id, None).await {
+            Ok(Some((owner, view))) => {
+                self.activate_desktop_control(owner, view, "已恢复连接 Codex Desktop 中的原任务")
+            }
+            Ok(None) | Err(_) => {
+                self.mark_saved_target_waiting()?;
+                self.persist()
+            }
+        }
+    }
+
+    fn mark_saved_target_waiting(&self) -> Result<(), String> {
+        let mut runtime = self
+            .runtime
+            .write()
+            .map_err(|_| "微信通道状态已损坏".to_string())?;
+        runtime.control_status = RemoteControlStatus::Saved;
+        runtime.control_ready = false;
+        runtime.control_backend = "none".to_string();
+        runtime.desktop_owner_client_id = None;
+        runtime.active_turn_id = None;
+        runtime.agent_preview.clear();
+        runtime.pending_approval = None;
+        // Pending-turn recovery is meaningful only while a control transport is
+        // available. Keep the user's selected task, but discard stale process-local
+        // monitoring state so startup remains side-effect free and the next command
+        // can establish a fresh monitor after attaching.
+        runtime.pending_thread_id = None;
+        runtime.pending_turn_id = None;
+        runtime.pending_reply_user_id = None;
+        runtime.pending_reply_context_token = None;
+        runtime.latest_activity =
+            Some("已恢复上次选择；收到微信指令或点击“控制”时才会启动 Codex Desktop".to_string());
+        runtime.last_error = None;
+        Ok(())
+    }
+
+    fn activate_desktop_control(
+        &self,
+        owner: String,
+        view: DesktopThreadView,
+        activity: &str,
+    ) -> Result<(), String> {
+        let pending_approval = view.pending_request.as_ref().map(desktop_pending_approval);
+        let mut runtime = self
+            .runtime
+            .write()
+            .map_err(|_| "微信通道状态已损坏".to_string())?;
+        runtime.control_status = RemoteControlStatus::Ready;
+        runtime.control_ready = true;
+        runtime.control_backend = "desktop_ipc".to_string();
+        runtime.desktop_owner_client_id = Some(owner);
+        runtime.active_turn_id = view.active_turn_id;
+        runtime.agent_preview = view.agent_preview.unwrap_or_default();
+        runtime.pending_approval = pending_approval;
+        runtime.latest_activity = Some(activity.to_string());
+        runtime.last_error = None;
+        runtime.task_selection_active = false;
+        Ok(())
     }
 
     pub async fn start_login(&self) -> Result<RemoteChannelSnapshot, String> {
@@ -697,6 +770,7 @@ impl RemoteChannelState {
             runtime.attached_thread_id = Some(task.id.clone());
             runtime.attached_thread_title = Some(task.title.clone());
             runtime.attached_cwd = Some(task.cwd.clone());
+            runtime.control_status = RemoteControlStatus::Connecting;
             runtime.control_ready = false;
             runtime.control_backend = "none".to_string();
             runtime.desktop_owner_client_id = None;
@@ -751,24 +825,7 @@ impl RemoteChannelState {
         }
 
         if let Some((owner, view)) = desktop_connection {
-            let pending_approval = view.pending_request.as_ref().map(desktop_pending_approval);
-            let mut runtime = self
-                .runtime
-                .write()
-                .map_err(|_| "微信通道状态已损坏".to_string())?;
-            runtime.attached_thread_id = Some(task.id);
-            runtime.attached_thread_title = Some(task.title);
-            runtime.attached_cwd = Some(task.cwd);
-            runtime.control_ready = true;
-            runtime.control_backend = "desktop_ipc".to_string();
-            runtime.desktop_owner_client_id = Some(owner);
-            runtime.active_turn_id = view.active_turn_id;
-            runtime.agent_preview = view.agent_preview.unwrap_or_default();
-            runtime.pending_approval = pending_approval;
-            runtime.latest_activity = Some("已自动连接 Codex Desktop 中的原任务".to_string());
-            runtime.last_error = None;
-            runtime.task_selection_active = false;
-            drop(runtime);
+            self.activate_desktop_control(owner, view, "已自动连接 Codex Desktop 中的原任务")?;
             self.persist()?;
             return Ok(self.snapshot());
         }
@@ -785,6 +842,7 @@ impl RemoteChannelState {
             runtime.attached_thread_id = Some(task.id);
             runtime.attached_thread_title = Some(task.title);
             runtime.attached_cwd = Some(task.cwd);
+            runtime.control_status = RemoteControlStatus::Unavailable;
             runtime.control_ready = false;
             runtime.control_backend = "none".to_string();
             runtime.desktop_owner_client_id = None;
@@ -821,6 +879,7 @@ impl RemoteChannelState {
                 runtime.attached_thread_id = Some(task.id);
                 runtime.attached_thread_title = Some(task.title);
                 runtime.attached_cwd = Some(task.cwd);
+                runtime.control_status = RemoteControlStatus::Unavailable;
                 runtime.control_ready = false;
                 runtime.control_backend = "none".to_string();
                 runtime.desktop_owner_client_id = None;
@@ -841,6 +900,7 @@ impl RemoteChannelState {
             runtime.attached_thread_id = Some(attached_thread_id);
             runtime.attached_thread_title = Some(task.title);
             runtime.attached_cwd = Some(task.cwd);
+            runtime.control_status = RemoteControlStatus::Ready;
             runtime.control_ready = true;
             runtime.control_backend = "xray_app_server".to_string();
             runtime.desktop_owner_client_id = None;
@@ -1289,6 +1349,7 @@ impl RemoteChannelState {
                     .to_string(),
             );
             runtime.attached_cwd = Some(cwd.to_string_lossy().to_string());
+            runtime.control_status = RemoteControlStatus::Ready;
             runtime.control_ready = true;
             runtime.control_backend = "xray_app_server".to_string();
             runtime.desktop_owner_client_id = None;
@@ -2222,11 +2283,16 @@ impl RemoteChannelState {
         }
         lines.push(format!(
             "控制：{}",
-            match (snapshot.control_ready, snapshot.control_backend.as_str()) {
-                (true, "desktop_ipc") => "Codex Desktop 原任务（IPC）",
-                (true, "xray_app_server") => "X-Ray 独立 App Server 任务",
-                (true, _) => "X-Ray 已建立控制",
-                (false, _) => "暂不可控制（未创建副本）",
+            match (
+                snapshot.control_status,
+                snapshot.control_ready,
+                snapshot.control_backend.as_str(),
+            ) {
+                (RemoteControlStatus::Saved, false, _) => "目标已保存，等待按需启动 Codex",
+                (_, true, "desktop_ipc") => "Codex Desktop 原任务（IPC）",
+                (_, true, "xray_app_server") => "X-Ray 独立 App Server 任务",
+                (_, true, _) => "X-Ray 已建立控制",
+                (_, false, _) => "暂不可控制（未创建副本）",
             }
         ));
         if let Some(ref turn) = snapshot.active_turn_id {
@@ -2245,6 +2311,11 @@ impl RemoteChannelState {
         if snapshot.attached_thread_id.is_none() {
             lines.push(
                 "下一步：请在 X-Ray 页面选择控制目标；人在外面时也可发送 /list 临时切换。"
+                    .to_string(),
+            );
+        } else if snapshot.control_status == RemoteControlStatus::Saved {
+            lines.push(
+                "下一步：直接发送普通文字即可；X-Ray 收到指令后才会启动 Codex Desktop。"
                     .to_string(),
             );
         } else if !snapshot.control_ready {
@@ -2859,10 +2930,6 @@ fn desktop_pending_approval(request: &DesktopPendingRequest) -> PendingApproval 
 fn is_active_writer_conflict(error: &str) -> bool {
     let error = error.to_ascii_lowercase();
     error.contains("active writer") || error.contains("another writer")
-}
-
-fn is_occupied_error(error: &str) -> bool {
-    is_active_writer_conflict(error) || error.contains("IPC")
 }
 
 fn command_error_reply(error: &str) -> String {
@@ -3593,6 +3660,61 @@ mod tests {
         .unwrap();
         assert_eq!(config.pending_turn_id, None);
         assert_eq!(config.pending_reply_context_token, None);
+    }
+
+    #[test]
+    fn startup_restores_selection_without_starting_a_control_backend() {
+        let root =
+            std::env::temp_dir().join(format!("codex-xray-saved-target-test-{}", next_client_id()));
+        fs::create_dir_all(&root).unwrap();
+        let thread_id = "saved-target-without-owner".to_string();
+        save_config(
+            &root.join("remote-channel.json"),
+            &RemoteChannelFile {
+                attached_thread_id: Some(thread_id.clone()),
+                attached_thread_title: Some("Saved task".to_string()),
+                attached_cwd: Some("/tmp/project".to_string()),
+                pending_thread_id: Some(thread_id.clone()),
+                pending_turn_id: Some("stale-turn".to_string()),
+                pending_reply_user_id: Some("weixin-user".to_string()),
+                ..RemoteChannelFile::default()
+            },
+        )
+        .unwrap();
+        let channel =
+            RemoteChannelState::load(&root, Arc::new(Mutex::new(None)), root.join("codex-state"))
+                .unwrap();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        runtime
+            .block_on(channel.restore_saved_attachment(thread_id.clone()))
+            .unwrap();
+        let snapshot = channel.snapshot();
+        assert_eq!(snapshot.control_status, RemoteControlStatus::Saved);
+        assert!(!snapshot.control_ready);
+        assert_eq!(snapshot.control_backend, "none");
+        assert!(snapshot.last_error.is_none());
+        assert!(
+            snapshot
+                .latest_activity
+                .as_deref()
+                .is_some_and(|activity| activity.contains("才会启动 Codex Desktop"))
+        );
+        let persisted = read_config(&root.join("remote-channel.json")).unwrap();
+        assert_eq!(
+            persisted.attached_thread_id.as_deref(),
+            Some(thread_id.as_str())
+        );
+        assert_eq!(persisted.pending_thread_id, None);
+        assert_eq!(persisted.pending_turn_id, None);
+        assert_eq!(persisted.pending_reply_user_id, None);
+
+        drop(channel);
+        drop(runtime);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
